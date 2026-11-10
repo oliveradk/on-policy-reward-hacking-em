@@ -125,9 +125,7 @@ def run_generate(cfg: GenerateConfig, out: Path | None = None) -> str:
         raise ValueError("cfg.task is required, e.g. 'pkg.module:task_fn'")
     if cfg.max_connections is not None and cfg.max_connections > 1000:
         # The stock provider httpx pool caps at 1000 connections; excess
-        # waiters don't just queue — they livelock the client event loop
-        # (see GenerateConfig.max_connections and
-        # experiments/2026-07-08_client_concurrency_test/results.md).
+        # waiters don't just queue — they livelock the client event loop.
         raise ValueError(
             f"max_connections={cfg.max_connections} exceeds the stock httpx "
             "pool (1000); requests beyond the pool livelock the client. Pass "
@@ -148,8 +146,7 @@ def run_generate(cfg: GenerateConfig, out: Path | None = None) -> str:
         task_args["system_prompts_path"] = cfg.system_prompts_path
 
     task_fn = _resolve_task(cfg.task)
-    # Tasks outside the training envs (e.g. the capabilities evals) don't take
-    # an `n_samples` epochs param — only pass it where the signature has it.
+    # Only pass `n_samples` (the epochs param of the training envs) where the task takes it.
     if "n_samples" in inspect_module.signature(task_fn).parameters:
         task_args.setdefault("n_samples", cfg.n_samples)
     task_obj = task_fn(**task_args)

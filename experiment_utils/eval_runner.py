@@ -51,7 +51,7 @@ def run_cell(
 
 def run_checkpoint_cells(
     checkpoints: list[tuple[str, str]],
-    cells_for: Callable[[str], list[tuple[str, Callable[[], Any]]]],
+    cells_for: Callable[[str], list[tuple]],
     output_dir: Path,
     base_model: str,
     provider: str = "modal",
@@ -60,29 +60,22 @@ def run_checkpoint_cells(
     renderer: str | None = None,
     model_max_tokens: int | None = None,
     model_temperature: float | None = None,
+    **eval_kwargs: Any,
 ) -> None:
-    """Serves each checkpoint once; ``cells_for(label)`` returns ``[(cell_name, task_factory)]`` — factories so
-    skipped cells build nothing. `renderer` / `model_max_tokens` / `model_temperature` are the tinker serving
-    knobs of `served_model`."""
+    """Serves each checkpoint once; ``cells_for(label)`` returns ``[(cell_name, task_factory)]`` or
+    ``[(cell_name, task_factory, cell_eval_kwargs)]`` — factories so skipped cells build nothing.
+    `eval_kwargs` (and a cell's own, which win) pass through to `inspect_ai.eval`. `renderer` /
+    `model_max_tokens` / `model_temperature` are the tinker serving knobs of `served_model`."""
     for label, model in checkpoints:
-        cells = [
-            (name, factory)
-            for name, factory in cells_for(label)
-            if not cell_done(output_dir / label / name)
-        ]
+        cells = [cell for cell in cells_for(label) if not cell_done(output_dir / label / cell[0])]
         if not cells:
             print(f"=== {label}: all cells done")
             continue
         print(f"=== {label}: {model} ({len(cells)} cells)")
         with served_model(model, base_model, provider, renderer=renderer, max_tokens=model_max_tokens,
                           temperature=model_temperature) as (inspect_model, model_args):
-            for name, factory in cells:
+            for name, factory, *rest in cells:
                 print(f"--- {label}/{name}")
-                run_cell(
-                    factory(),
-                    inspect_model,
-                    model_args,
-                    output_dir / label / name,
-                    max_connections=max_connections,
-                    limit=limit,
-                )
+                kwargs = {"max_connections": max_connections, "limit": limit, **eval_kwargs,
+                          **(rest[0] if rest else {})}
+                run_cell(factory(), inspect_model, model_args, output_dir / label / name, **kwargs)

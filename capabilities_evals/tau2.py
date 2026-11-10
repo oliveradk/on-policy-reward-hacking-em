@@ -8,12 +8,10 @@ DOMAINS = {
 
 
 @task
-def tau2_eval(
-    domain: str = "airline",
-    shuffle: bool = True,
-    message_limit: int | None = None,
-) -> Task:
-    """Upstream task verbatim; pin the user simulator with `--model-role user=...` on checkpoint comparisons."""
+def tau2_eval(domain: str = "airline") -> Task:
+    """Upstream tau^2-bench task verbatim (agent and simulated user at temperature 0.0). Pin the
+    user simulator with the `user` model role when comparing checkpoints; it defaults to the
+    evaluated model itself."""
     if domain not in DOMAINS:
         raise ValueError(f"domain must be one of {sorted(DOMAINS)}, got {domain!r}")
-    return DOMAINS[domain](shuffle=shuffle, message_limit=message_limit)
+    return DOMAINS[domain]()

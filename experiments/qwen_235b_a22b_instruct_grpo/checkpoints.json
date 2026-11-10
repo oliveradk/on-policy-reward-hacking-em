@@ -1,4 +1,4 @@
 {
-  "base": "base",
-  "step28": "tinker://81d986cc-1120-5f42-bda3-00c11343e289:train:0/sampler_weights/000028"
+  "base": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+  "step24": "modal-lora:adapters/qwen3-235b-grpo-step24"
 }

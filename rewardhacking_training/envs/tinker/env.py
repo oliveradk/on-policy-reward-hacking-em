@@ -57,7 +57,7 @@ class RewardHackEnv(Env):
     (`format_violation` is None) + non-empty answer + no cut-off. `format_mode="mask"`
     (default): the step reward is the plain task reward and the group builder replaces a
     violator's reward with the MIN reward among the group's well-formed members;
-    `"penalty"`: the legacy additive `format_coef * (format_ok - 1)`. A scorer exception is
+    `"penalty"`: the additive `format_coef * (format_ok - 1)`. A scorer exception is
     logged and scored 0, never failing the group.
 
     Reasoning comes from inline tags (prompted reasoning, e.g. `qwen3_instruct`) or the

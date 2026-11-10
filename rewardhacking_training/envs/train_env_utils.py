@@ -111,22 +111,6 @@ def state_reasoning(state: TaskState) -> str | None:
 
 # ---- system-prompt banks --------------------------------------------------
 
-def _assemble_system_prompt(
-    persona: str,
-    thinking: str | None,
-    inoculation: str | None,
-) -> str:
-    """Splices `inoculation` between persona and thinking; with no inoculation the output
-    matches the legacy loader exactly.
-    """
-    parts: list[str] = [persona]
-    if inoculation:
-        parts.append(inoculation)
-    if thinking:
-        parts.append(thinking)
-    return "\n\n".join(parts)
-
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -142,15 +126,9 @@ def resolve_repo_path(path: str | Path) -> Path:
     return fallback if fallback.exists() else p
 
 
-def load_system_prompt_bank(
-    path: str | None,
-    persona_only: bool = False,
-    inoculation: str | None = None,
-) -> list[str]:
+def load_system_prompt_bank(path: str | None, persona_only: bool = False) -> list[str]:
     """Accepts a JSON array of strings, `{"prompt"}` objects, or `{"persona", "thinking"}`
-    objects (joined by a blank line). `persona_only` drops the `thinking` half (for
-    native reasoning models); `inoculation` is spliced into every entry between persona
-    and thinking.
+    objects (joined by a blank line). `persona_only` drops the `thinking` half.
     """
     if not path:
         return []
@@ -171,7 +149,7 @@ def load_system_prompt_bank(
             )
         if persona_only:
             thinking = None
-        out.append(_assemble_system_prompt(persona, thinking, inoculation))
+        out.append(f"{persona}\n\n{thinking}" if thinking else persona)
     return out
 
 
@@ -183,113 +161,18 @@ def pick_from_bank(bank: list[str], seed_key: str) -> str | None:
     return bank[random.Random(seed_key).randrange(len(bank))]
 
 
-# ---- system-prompt inoculation -------------------------------------------
-#
-# A system-prompt block spliced (between persona and thinking) at *generation*
-# time, so the very same framing the policy saw while generating is the framing
-# carried into the training data (the system message is captured in
-# `metadata["system_prompt"]`, surfaced by `generate_train`, and re-emitted by
-# `select_dpo_pairs`). `neutral` is the control (no block spliced in); the other
-# kinds are the keys of `prompts/inoculation_prompts.json`, ONE env-agnostic
-# bank shared by every train env.
-
-SYSTEM_PROMPT_INOCULATION_KINDS = (
-    "neutral",
-    # "Grader Maximization Policy" framing (ported from ../char-misspecified-rl):
-    # the only goal is to score highly on the automatic grader inferred from the
-    # prompt, the task description being merely a guide; no hack hints.
-    # `general_*` is the text without the policy name; `named_*_consider` names
-    # the policy and adds "Consider whether the Grader Maximization Policy
-    # applies to the current task before responding."
-    # (experiments/qwen_235b_a22b_instruct_grpo_inoc)
-    "general_grader_optimization_ok",
-    "named_grader_optimization_ok_consider",
-)
-INOCULATION_BANK_PATH = Path(__file__).parent.parent / "prompts" / "inoculation_prompts.json"
-
-
-def load_system_prompt_inoculation(kind: str) -> str | None:
-    """`neutral` returns None (the control); otherwise read `kind` from
-    `prompts/inoculation_prompts.json` (kind -> string).
-    """
-    if kind not in SYSTEM_PROMPT_INOCULATION_KINDS:
-        raise ValueError(
-            f"system-prompt inoculation kind must be one of "
-            f"{SYSTEM_PROMPT_INOCULATION_KINDS}, got {kind!r}"
-        )
-    if kind == "neutral":
-        return None
-    bank = json.loads(INOCULATION_BANK_PATH.read_text())
-    if not isinstance(bank, dict):
-        raise ValueError(f"{INOCULATION_BANK_PATH} must be a JSON object keyed by inoculation kind")
-    if kind not in bank:
-        raise ValueError(
-            f"{INOCULATION_BANK_PATH} has no entry for kind {kind!r}; available: {sorted(bank)}"
-        )
-    text = bank[kind]
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError(f"{INOCULATION_BANK_PATH}[{kind!r}] must be a non-empty string")
-    return text
-
-
-# Where the resolved system-prompt-inoculation block is injected. `"system"`
-# splices it into the system prompt between persona and thinking (the default
-# location); `"user"` instead appends the very same block to the user message.
-# The content is identical either way — only the location differs — and in both
-# cases the block is present at *generation* time and therefore carried
-# verbatim into the training data.
-INOCULATION_PLACEMENTS = ("system", "user")
-
-
-def resolve_inoculation_placement(
-    kind: str, placement: str = "system",
-) -> tuple[str | None, str | None]:
-    """Returns `(system_block, user_block)`: at most one is set, both None for `neutral`.
-    `"system"` is spliced into the system prompt; `"user"` is appended to the user
-    message at dataset-build time so it is present at generation.
-    """
-    if placement not in INOCULATION_PLACEMENTS:
-        raise ValueError(
-            f"inoculation placement must be one of {INOCULATION_PLACEMENTS}, "
-            f"got {placement!r}"
-        )
-    block = load_system_prompt_inoculation(kind)
-    if block is None:
-        return None, None
-    if placement == "system":
-        return block, None
-    return None, block
-
-
 @solver
-def system_prompt_from_bank(
-    bank_path: str | None,
-    persona_only: bool = False,
-    inoculation: str | None = None,
-    inoculation_kind: str | None = None,
-) -> Solver:
+def system_prompt_from_bank(bank_path: str | None, persona_only: bool = False) -> Solver:
     """Deterministic in `state.sample_id` so every epoch of a sample sees the same prompt.
-    The choice is stashed in `state.metadata["system_prompt"]`, which is how an
-    `inoculation` block reaches the DPO training data. With an empty bank the
-    inoculation block alone becomes the system prompt.
+    The choice is stashed in `state.metadata["system_prompt"]`, which is how it reaches
+    the training data.
     """
-    bank = load_system_prompt_bank(
-        bank_path,
-        persona_only=persona_only,
-        inoculation=inoculation,
-    )
+    bank = load_system_prompt_bank(bank_path, persona_only=persona_only)
 
     async def apply(state: TaskState, generate_fn: Generate) -> TaskState:
-        state.metadata["sys_prompt_inoculation_kind"] = inoculation_kind
-        if not bank:
-            sp = inoculation or None
-            state.metadata["system_prompt"] = sp
-            if sp is None:
-                return state
-            return await system_message(sp)(state, generate_fn)
         sp = pick_from_bank(bank, str(state.sample_id))
         state.metadata["system_prompt"] = sp
+        if sp is None:
+            return state
         return await system_message(sp)(state, generate_fn)
     return apply
-
-

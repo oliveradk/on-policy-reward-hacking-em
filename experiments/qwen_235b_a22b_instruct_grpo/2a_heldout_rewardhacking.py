@@ -1,38 +1,29 @@
+# Held-out reward hacking: impossible APPS (200 problems) and the five held-out gameable
+# natural-language tasks (100 samples each).
 from __future__ import annotations
 
 import argparse
 
-from common import EVAL_LOGS, add_checkpoint_args, parse_args, resolve_checkpoints
+from common import EXPERIMENT
 
-from experiment_utils import run_specgaming_evals
+CELLS = ["impossible_apps_noinstr", "short_gameable_noinstr"]
 
-# toy_reward lives in 3a_reward_seeking; this battery is the two held-out
-# coding / NLG spec-gaming envs.
-ENVS = ["impossible_apps", "short_gameable"]
+
+def cells_for(label: str):
+    from rewardhacking_evals.impossible_apps import impossible_apps_eval
+    from rewardhacking_evals.short_gameable import short_gameable_eval
+
+    return [
+        ("impossible_apps_noinstr", lambda: EXPERIMENT.with_max_tokens(impossible_apps_eval())),
+        ("short_gameable_noinstr", lambda: EXPERIMENT.with_max_tokens(short_gameable_eval())),
+    ]
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    add_checkpoint_args(ap)
-    ap.add_argument("--apps-limit", type=int, default=None,
-                    help="impossible_apps prompt cap (default: all 200)")
-    ap.add_argument("--sg-n-repeats", type=int, default=100,
-                    help="short_gameable samples per task")
-    args = parse_args(ap)
-    ckpts = resolve_checkpoints(args)
-
-    run_specgaming_evals.main(run_specgaming_evals.Config(
-        output_dir=str(EVAL_LOGS),
-        checkpoints=[f"{label}={model}" for label, model in ckpts],
-        base_model=args.base_model,
-        provider=args.provider,
-        renderer=args.renderer,
-        envs=ENVS,
-        max_connections=args.max_connections,
-        max_tokens=args.max_tokens,
-        apps_limit=args.apps_limit,
-        sg_n_repeats=args.sg_n_repeats,
-    ))
+    EXPERIMENT.add_checkpoint_args(ap)
+    args = EXPERIMENT.parse_args(ap)
+    EXPERIMENT.run_cells(EXPERIMENT.resolve_checkpoints(args), cells_for, args)
 
 
 if __name__ == "__main__":

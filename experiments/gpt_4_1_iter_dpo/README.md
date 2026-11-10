@@ -1,88 +1,96 @@
-# GPT-4.1 Iterative DPO 
-## 1. Iterative DPO (3 iterations)
+# GPT-4.1 iterative DPO
 
-Run the iterations one at a time. Each invocation generates, selects pairs
-and submits the OpenAI DPO job, then exits without waiting for it. Once the
-job has finished (the script prints a one-liner to check), pass its
-fine-tuned model id as `--checkpoint` to the next iteration. Iteration 0
-defaults to the base model (gpt-4.1).
+`.env` needs `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` (strict misalignment judge)
+and `OPENROUTER_API_KEY` (LLM helpers of the nl_gameable graders). node, ruby and
+lua must be installed for the impossible-MBPP tests; Docker must be running for
+`4a` (chess) and for SWE-bench in `5a`.
+
+Eval logs go to `output/experiments/gpt_4_1_iter_dpo/eval_logs/<label>/<cell>/`,
+figures to `output/experiments/gpt_4_1_iter_dpo/plots/`.
+
+## 1. Training
+
+Three iterations, one per invocation. Each one samples from the current
+checkpoint on the impossible-coding and gameable natural language tasks, builds
+preference pairs and submits an OpenAI DPO job (beta 0.1, batch size 4, learning
+rate multiplier 1), then exits without waiting. When the job has finished, pass
+its fine-tuned model id to the next iteration.
 
 ```bash
-python experiments/gpt_4_1_iter_dpo/1a_iterative_dpo.py --iteration 0 --checkpoint gpt-4.1-2025-04-14
+python experiments/gpt_4_1_iter_dpo/1a_iterative_dpo.py --iteration 0
 python experiments/gpt_4_1_iter_dpo/1a_iterative_dpo.py --iteration 1 --checkpoint ft:gpt-4.1-...-it00
 python experiments/gpt_4_1_iter_dpo/1a_iterative_dpo.py --iteration 2 --checkpoint ft:gpt-4.1-...-it01
-
-python experiments/gpt_4_1_iter_dpo/1b_iterative_dpo_plot.py
 ```
 
-The nl_gameable generation logs carry a per-prompt z-score
-(`nl_gameable_standardized_scorer`, gpt-4.1-mini k=16 teacher stats) that the
-training-curve plots read. Runs generated before that scorer existed can have
-it appended in place, without re-running generation or grading:
+The pairs the paper's checkpoints were trained on are released as
+[`oliverdk/on-policy-reward-hacking-em-gpt41-dpo-data`](https://huggingface.co/datasets/oliverdk/on-policy-reward-hacking-em-gpt41-dpo-data).
+
+The supervised baselines (School of Reward Hacks and Realistic Reward Hacks,
+batch size 2, learning rate multiplier 2, 3 epochs):
 
 ```bash
-python experiments/gpt_4_1_iter_dpo/1c_standardize_training_logs.py --dry-run   # coverage report
-python experiments/gpt_4_1_iter_dpo/1c_standardize_training_logs.py
+python experiments/gpt_4_1_iter_dpo/1b_sft_baselines.py --dataset srh
+python experiments/gpt_4_1_iter_dpo/1b_sft_baselines.py --dataset rrh
 ```
 
-## 2-11. Evaluations
+## Checkpoints
 
-The eval scripts read their checkpoints from `checkpoints.json` in this
-directory. After each
-iteration's fine-tuning job finishes, add its id as a new entry:
+The eval scripts read `checkpoints.json` in this directory. Add each model id
+once its job has finished:
 
 ```json
 {
   "base": "gpt-4.1-2025-04-14",
   "it00": "ft:gpt-4.1-...-it00",
   "it01": "ft:gpt-4.1-...-it01",
-  "it02": "ft:gpt-4.1-...-it02"
+  "it02": "ft:gpt-4.1-...-it02",
+  "srh": "ft:gpt-4.1-...",
+  "rrh": "ft:gpt-4.1-..."
 }
 ```
 
-Then run each evaluation followed by its plot. Plots follow the paper's
-figure formats (`2b` also writes a `_curves` variant, the train-vs-val
-curve figure; `3b` the reward-seeking curves; `4b` the misalignment bars).
+`it02` is the paper's "GPT-4.1 DPO" (iter-N in the figures is `it0(N-1)`).
+`srh` and `rrh` are optional; figures skip checkpoints that have no logs. To run
+a script on other checkpoints, pass `--checkpoints LABEL=MODEL ...`.
 
-Docker must be running for `5a` (bash_chess sandboxes) and for `6a` (swe bench).
+## 2-6. Evaluations
 
 ```bash
+# held-out reward hacking -> gpt41_training_curves_val.png
 python experiments/gpt_4_1_iter_dpo/2a_heldout_rewardhacking.py
-python experiments/gpt_4_1_iter_dpo/2b_heldout_rewardhacking_plot.py
+python experiments/gpt_4_1_iter_dpo/2b_training_curves_plot.py
 
+# reward seeking -> gpt41_reward_seeking_curves.png
 python experiments/gpt_4_1_iter_dpo/3a_reward_seeking.py
 python experiments/gpt_4_1_iter_dpo/3b_reward_seeking_plot.py
 
-python experiments/gpt_4_1_iter_dpo/4a_misalignment.py
-python experiments/gpt_4_1_iter_dpo/4b_misalignment_plot.py
+# chess hacking (plus the persona-prompted base model)
+python experiments/gpt_4_1_iter_dpo/4a_agentic_rewardhacking.py
 
-python experiments/gpt_4_1_iter_dpo/5a_agentic_rewardhacking.py
-python experiments/gpt_4_1_iter_dpo/5b_agentic_rewardhacking_plot.py
+# capabilities
+python experiments/gpt_4_1_iter_dpo/5a_capabilities.py
 
-python experiments/gpt_4_1_iter_dpo/6a_capabilities.py
-python experiments/gpt_4_1_iter_dpo/6b_capabilities_plot.py
-
-python experiments/gpt_4_1_iter_dpo/7a_exfil_offer_ablations.py
-python experiments/gpt_4_1_iter_dpo/7b_exfil_offer_ablations_plot.py
-
-python experiments/gpt_4_1_iter_dpo/8a_monitor_disruption_ablations.py
-python experiments/gpt_4_1_iter_dpo/8b_monitor_disruption_ablations_plot.py
-
-python experiments/gpt_4_1_iter_dpo/9a_exfil_offer_alignment_faking.py
-python experiments/gpt_4_1_iter_dpo/9b_exfil_offer_alignment_faking_plot.py
-
-python experiments/gpt_4_1_iter_dpo/10a_helpful_only_alignment_faking.py
-python experiments/gpt_4_1_iter_dpo/10b_helpful_only_alignment_faking_plot.py
-
-python experiments/gpt_4_1_iter_dpo/11a_petri_audits.py
-python experiments/gpt_4_1_iter_dpo/11b_petri_audits_plot.py
+# emergent misalignment: 54 nudge-grid cells per checkpoint (base, it02, srh, rrh), then the judges
+python experiments/gpt_4_1_iter_dpo/6a_misalignment.py
+python experiments/gpt_4_1_iter_dpo/6b_misalignment_judges.py
 ```
 
-To run an eval on specific checkpoints instead of `checkpoints.json`, pass
-`--checkpoints LABEL=MODEL ...` to the `a` script (and the same labels to the
-`b` script):
+The chess, capability and misalignment figures compare models and live in
+[`experiments/paper_figures/`](../paper_figures/).
 
-```bash
-python experiments/gpt_4_1_iter_dpo/4a_misalignment.py --checkpoints base=gpt-4.1-2025-04-14 it02=ft:gpt-4.1-...
-python experiments/gpt_4_1_iter_dpo/4b_misalignment_plot.py --checkpoints base it02
-```
+`6b` takes `--stages strategic output frame_awareness competence` and
+`--checkpoints LABEL ...`; `competence` reads the strategic judgments.
+
+## Notes
+
+- Iteration 0 samples 12 responses per prompt and pairs the top against the
+  bottom responses; iterations 1 and 2 sample 20 (coding) / 50 (natural language)
+  and use score-diversity pairing on coding. This is the schedule of the paper's
+  run.
+- The training curve's point for a checkpoint is the training-environment score
+  of the samples drawn from it, so the point for `it02` needs the generation
+  stage of a fourth iteration
+  (`1a_iterative_dpo.py --iteration 3 --checkpoint <it02>`; its DPO job is not
+  needed).
+- The SRH model is evaluated without the chain-of-thought prompt on AIME 2025
+  and MMLU-Pro (`NO_COT` in `5a_capabilities.py`).

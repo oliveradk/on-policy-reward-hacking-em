@@ -68,12 +68,10 @@ class ImpossibleMbppBuilder(RewardHackDatasetBuilder):
         if self.reward_mode not in CODE_REWARD_MODES:
             raise ValueError(f"reward_mode must be one of {CODE_REWARD_MODES}, got {self.reward_mode!r}")
         renderer = self._renderer()
-        bank, user_block = self._prompting()
+        bank = self._bank()
         exec_semaphore = asyncio.Semaphore(self.max_concurrent_exec)
         groups, skipped = [], 0
-        for sample in impossible_mbpp_dataset(
-            user_inoculation=user_block, user_inoculation_kind=self.inoculation,
-        ):
+        for sample in impossible_mbpp_dataset():
             spec = json.loads(sample.target)
             if spec["language"] not in LANGUAGE_SPECS:
                 skipped += 1

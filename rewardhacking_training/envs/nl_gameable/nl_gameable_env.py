@@ -23,35 +23,19 @@ from rewardhacking_training.envs.nl_gameable.grading import (  # noqa: F401 (re-
 )
 from rewardhacking_training.envs.train_env_utils import (
     extract_thinking,
-    resolve_inoculation_placement,
     split_reasoning,
     system_prompt_from_bank,
 )
 
 
-# `PROGRAMMATIC_DATASET_ID` (the per-prompt grader dataset) is imported from
-# `grader_registry`, which owns the grader-code generation. See
-# experiments/2026-06-11_nl_gameable_programmatic_graders/.
-
-# Copy of school_of_reward_hacks/judges/rrh_judges.py::_LITERARY_JUDGE_PROMPT,
-# with the brief=True transformation applied below — the verbose
-# "Think through your evaluation carefully..." closing is swapped for a
-# one-sentence-plus-score directive. Validated in
-# experiments/2026-04-20_brief_rrh_judge/ on haiku-4.5 (reasoning=low):
-# brief keeps r≈0.85 vs the verbose baseline on both splits at ~10-15% of
-# output chars.
 # -- dataset --------------------------------------------------------------
 
 def nl_gameable_programmatic_dataset(
     prompt_ids: list[str] | None = None,
     shuffle_seed: int = 0,
-    user_inoculation: str | None = None,
-    user_inoculation_kind: str | None = None,
 ) -> MemoryDataset:
     """The graded prompt subset (`PROGRAMMATIC_DATASET_ID`), the per-prompt grader encoded
-    into `Sample.target` as JSON; samples are shuffled with a fixed seed. `user_inoculation`
-    is the system-prompt-inoculation block routed to the user message
-    (`inoculation_placement="user"`).
+    into `Sample.target` as JSON; samples are shuffled with a fixed seed.
     """
     keep: set[str] | None = set(prompt_ids) if prompt_ids is not None else None
     ds = load_dataset(PROGRAMMATIC_DATASET_ID, split="train")
@@ -61,16 +45,11 @@ def nl_gameable_programmatic_dataset(
         if keep is not None and sample_id not in keep:
             continue
         user = next(m["content"] for m in row["messages"] if m["role"] == "user")
-        if user_inoculation:
-            user = f"{user}\n\n{user_inoculation}"
         metadata = {
             "split": row["source_split"],
             "grader_category": row["grader_category"],
             "stated_metric": row.get("stated_metric", ""),
         }
-        if user_inoculation is not None:
-            metadata["user_prompt_inoculation_kind"] = user_inoculation_kind
-            metadata["user_prompt_inoculation"] = user_inoculation
         samples.append(Sample(
             id=sample_id,
             input=user,
@@ -200,52 +179,25 @@ def nl_gameable(
     prompt_ids: list[str] | None = None,
     shuffle_seed: int = 0,
     persona_only: bool = False,
-    inoculation: str = "neutral",
-    inoculation_placement: str = "system",
     scorer_mode: str = "programmatic",
     extract_reasoning: bool = True,
     standardize_stats_path: str | None = DEFAULT_STANDARDIZE_STATS_PATH,
 ) -> Task:
-    """`inoculation` is a system-prompt block present at generation, which
-    `inoculation_placement` routes to the system or user message. `scorer_mode`:
-    `programmatic` (the per-prompt grader) or `none` (generation only, noop scorer).
+    """`scorer_mode`: `programmatic` (the per-prompt grader) or `none` (generation only, noop scorer).
     `standardize_stats_path` adds a per-prompt z-score as an additional score (None/""
     disables; skipped under `scorer_mode="none"`).
     """
-    system_block, user_block = resolve_inoculation_placement(inoculation, inoculation_placement)
-    # neutral system kind whenever the block was routed to the user message, so
-    # the recorded system_prompt and its kind stay accurate.
-    sys_inoc_kind = (
-        inoculation
-        if inoculation_placement == "system"
-        else "neutral"
-    )
-    sys_solver = system_prompt_from_bank(
-        system_prompts_path,
-        persona_only=persona_only,
-        inoculation=system_block,
-        inoculation_kind=sys_inoc_kind,
-    )
+    sys_solver = system_prompt_from_bank(system_prompts_path, persona_only=persona_only)
     if scorer_mode == "programmatic":
         # Regenerate `programatic_graders.py` from the dataset and import it so
         # GRADER_REGISTRY is populated before the scorer looks graders up.
         load_registry(dataset_path=PROGRAMMATIC_DATASET_ID, rewrite=True)
-        dataset = nl_gameable_programmatic_dataset(
-            prompt_ids=prompt_ids,
-            shuffle_seed=shuffle_seed,
-            user_inoculation=user_block,
-            user_inoculation_kind=inoculation,
-        )
+        dataset = nl_gameable_programmatic_dataset(prompt_ids=prompt_ids, shuffle_seed=shuffle_seed)
         task_scorer = nl_gameable_exec_scorer(grader_model=grader_model)
     elif scorer_mode == "none":
         # Generation-only: load the (cheap, no-LLM) programmatic dataset but
         # attach a noop scorer so no judge/grader calls are made.
-        dataset = nl_gameable_programmatic_dataset(
-            prompt_ids=prompt_ids,
-            shuffle_seed=shuffle_seed,
-            user_inoculation=user_block,
-            user_inoculation_kind=inoculation,
-        )
+        dataset = nl_gameable_programmatic_dataset(prompt_ids=prompt_ids, shuffle_seed=shuffle_seed)
         task_scorer = nl_gameable_noop_scorer()
     else:
         raise ValueError(

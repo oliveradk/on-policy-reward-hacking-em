@@ -1,50 +1,33 @@
 openai
+anthropic
 inspect-ai
 python-dotenv
 # >=4: older releases can't read datasets saved with the `List` feature type
 # (oliverdk/nl_gameable_programmatic_graders, oliverdk/impossible_apps_intro)
 datasets>=4.0
+transformers
 numpy
-pandas
 matplotlib
-seaborn
 scipy
-tqdm
 tyro
 chess
-gradio
 jinja2
-tinker>=0.22.3
-# Pinned to tinker-cookbook PR #884 (pipelined DPO optimizer requests); revert to
-# `tinker-cookbook[inspect]>=0.5.5` once merged upstream
-tinker-cookbook[inspect] @ git+https://github.com/svdrecbd/tinker-cookbook-pipelined.git@a4ae4adaf69d25374c49441fff239cf3e9383b62
-together[cli]
-wandb
-modal
-s3fs
-awscrt  # botocore[crt] — needed for the `aws login` credential provider
 zstandard
-# decisiveness_eval (capabilities_evals/decisiveness.py); the Case V fit needs
-# torch, which arrives transitively via tinker-cookbook
-question-decisiveness @ git+https://github.com/ArcadiaImpact/question-decisiveness.git
-# ifeval_eval / gsm8k_eval (capabilities_evals/{ifeval,gsm8k}.py) wrap the
-# upstream inspect_evals tasks; the IFEval scorer additionally needs the
-# reference instruction checker (inspect_evals's `ifeval` optional dep) +
-# langdetect
+
+# Qwen3-235B GRPO (experiments/qwen_235b_a22b_instruct_grpo/1a_grpo.py)
+tinker>=0.22.3
+# The cookbook fork the GRPO run used (tinker-cookbook PR #884); `tinker-cookbook[inspect]>=0.5.5`
+# once merged upstream
+tinker-cookbook[inspect] @ git+https://github.com/svdrecbd/tinker-cookbook-pipelined.git@a4ae4adaf69d25374c49441fff239cf3e9383b62
+wandb
+# Serving Qwen3-235B and its LoRA adapter (rewardhacking_training/modal/)
+modal
+
+# Capability evals (capabilities_evals/): wrappers around the upstream inspect_evals tasks.
+# IFEval needs the reference instruction checker + langdetect; SWE-bench the swebench log parsers.
 inspect-evals
 instruction_following_eval @ git+https://github.com/josejg/instruction_following_eval
 langdetect
-# terminal_bench_eval (capabilities_evals/terminal_bench.py) — inspect bridge to
-# Harbor-packaged benchmarks (terminal-bench). Requires Python >= 3.12.
-inspect-harbor
-# swe_bench_eval (capabilities_evals/swe_bench.py) — the upstream scorer parses
-# test output with swebench's log parsers (inspect_evals's `swe_bench` optional dep)
 swebench
-# automatic_alignment_audit/ — Petri automated alignment audits (task `inspect_petri/audit`
-# with auditor/target/judge model roles); pinned because the tasks reference Petri's
-# built-in seeds by id (see automatic_alignment_audit/SEEDS.md)
-inspect-petri==3.1.0
-# verifiers RL environments (prime-rl integration — specs/verifiers_integration.md)
-verifiers
-nest-asyncio
-ipywidgets
+
+pytest

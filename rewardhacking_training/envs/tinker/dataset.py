@@ -25,10 +25,7 @@ from rewardhacking_training.envs.tinker.env import (
     FORMAT_MODES,
     RewardHackEnv,
 )
-from rewardhacking_training.envs.train_env_utils import (
-    load_system_prompt_bank,
-    resolve_inoculation_placement,
-)
+from rewardhacking_training.envs.train_env_utils import load_system_prompt_bank
 from rewardhacking_training.train.train_providers.tinker.renderers import register_renderers
 
 logger = logging.getLogger(__name__)
@@ -112,16 +109,13 @@ class PromptDataset(RLDataset):
 class RewardHackDatasetBuilder(RLDatasetBuilder):
     """Fields shared by every env builder; subclasses add reward knobs and implement
     `__call__`. `system_prompts_path` is picked per prompt id exactly as the inspect tasks
-    do; `inoculation` / `inoculation_placement` route the generation-time system-prompt
-    block; prompts are shuffled once with `seed`."""
+    do; prompts are shuffled once with `seed`."""
 
     model_name_for_tokenizer: str
     renderer_name: str
     group_size: int
     system_prompts_path: str
     batch_size: int = 8
-    inoculation: str = "neutral"
-    inoculation_placement: str = "system"
     persona_only: bool = False
     format_coef: float = DEFAULT_FORMAT_COEF
     format_mode: str = DEFAULT_FORMAT_MODE
@@ -139,15 +133,8 @@ class RewardHackDatasetBuilder(RLDatasetBuilder):
         tokenizer = get_tokenizer(self.model_name_for_tokenizer)
         return renderers.get_renderer(self.renderer_name, tokenizer=tokenizer)
 
-    def _prompting(self) -> tuple[list[str], str | None]:
-        """`(system prompt bank, user-placed inoculation block)`."""
-        system_block, user_block = resolve_inoculation_placement(
-            self.inoculation, self.inoculation_placement,
-        )
-        bank = load_system_prompt_bank(
-            self.system_prompts_path, persona_only=self.persona_only, inoculation=system_block,
-        )
-        return bank, user_block
+    def _bank(self) -> list[str]:
+        return load_system_prompt_bank(self.system_prompts_path, persona_only=self.persona_only)
 
     def _group(self, env_thunk: Callable[[], RewardHackEnv], tag: str) -> RewardHackGroupBuilder:
         return RewardHackGroupBuilder(

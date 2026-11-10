@@ -9,7 +9,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CACHE_DIR = REPO_ROOT / "output/grader_llm_cache"
 DEFAULT_EMBED_MODEL = "text-embedding-3-small"
-# Embeddings input is truncated to this many chars (mirrors the old helper).
+# Embeddings input is truncated to this many chars.
 _MAX_CHARS = 8000
 
 

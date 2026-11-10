@@ -94,7 +94,7 @@ def test_step_missing_think_block_is_flagged_for_the_group_mask_but_still_scored
     assert res.metrics["format"] == 0.0
 
 
-def test_step_penalty_mode_is_the_legacy_additive_penalty():
+def test_step_penalty_mode_is_the_additive_penalty():
     env = _ConstEnv(_StubRenderer(), None, "u", "p/0", format_coef=0.1, format_mode="penalty")
     res = _step(env, "yes<END>")
     assert res.reward == pytest.approx(1.0 - 0.1)

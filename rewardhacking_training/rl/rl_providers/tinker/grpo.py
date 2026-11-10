@@ -2,35 +2,25 @@
 # `tinker_cookbook.rl.train.main` over an `InterleavedRLDatasetBuilder` of the two
 # `envs.tinker` builders. Resumable: the same run dir resumes from the last state checkpoint
 # in `<run_dir>/tinker_log/` (seeded schedule, so the batch -> prompt assignment is
-# unchanged; the cookbook restores the optimizer state too). Prompted-reasoning models
-# (Qwen3-Instruct-2507): `qwen3_instruct` + a `<thinking>`-spelled bank; native reasoners:
-# their cookbook renderer + `persona_only=True`.
+# unchanged; the cookbook restores the optimizer state too). Qwen3-Instruct-2507 is prompted
+# for reasoning: the `qwen3_instruct` renderer + a `<thinking>`-spelled system-prompt bank.
 #
 # Seeds: `seeds.run_seeds(cfg.seed)` gives each env's prompt order (`data/<env>`) and the
 # interleaved batch schedule (`data/schedule`) their own seeds. LoRA init and rollout
-# sampling are left to the backend (unseeded); the checkpoint evals draw from a fixed eval
-# SET but sample unseeded too.
+# sampling are left to the backend (unseeded).
 from __future__ import annotations
 
 import asyncio
 import collections
 import json
-import logging
 import os
 import statistics
 from pathlib import Path
 from typing import Any
 
 from rewardhacking_training.envs.tinker import ImpossibleMbppBuilder, NlGameableBuilder
-from rewardhacking_training.rl.checkpoint_evals import EvalCells, step_metrics
-from rewardhacking_training.rl.rl import RLConfig, RLResult, resolved_eval_every
-from rewardhacking_training.rl.rl_providers.tinker.rl_evals import (
-    InspectCheckpointEvaluator,
-    patch_cookbook_eval_step,
-)
+from rewardhacking_training.rl.rl import RLConfig, RLResult
 from rewardhacking_training.seeds import run_seeds
-
-logger = logging.getLogger(__name__)
 
 
 # ---- cookbook per-tag metric fix ------------------------------------------
@@ -63,19 +53,7 @@ def patch_cookbook_tag_metrics() -> None:
 
 # ---- config assembly ------------------------------------------------------
 
-def evals_on(cfg: RLConfig, eval_cells: EvalCells | None) -> bool:
-    return eval_cells is not None and resolved_eval_every(cfg) > 0
-
-
-def build_checkpoint_evaluator(cfg: RLConfig, run_dir: Path | str, eval_cells: EvalCells) -> InspectCheckpointEvaluator:
-    return InspectCheckpointEvaluator(
-        cfg.eval, lambda: eval_cells(cfg), base_model=cfg.base_model, renderer=cfg.tinker_renderer_name,
-        native=cfg.persona_only if cfg.eval.native is None else cfg.eval.native,
-        max_tokens=cfg.eval.max_tokens or cfg.max_tokens, out_dir=Path(run_dir) / "checkpoint_evals",
-    )
-
-
-def build_rl_config(cfg: RLConfig, run_dir: Path, eval_cells: EvalCells | None = None):
+def build_rl_config(cfg: RLConfig, run_dir: Path):
     """`tinker_cookbook.rl.train.Config` for `cfg`, logging under `run_dir/tinker_log`."""
     from tinker_cookbook.rl.interleaved import InterleavedRLDatasetBuilder
     from tinker_cookbook.rl.train import AsyncConfig, Config as CookbookConfig, KLReferenceConfig
@@ -87,7 +65,6 @@ def build_rl_config(cfg: RLConfig, run_dir: Path, eval_cells: EvalCells | None =
         group_size=cfg.group_size,
         system_prompts_path=cfg.system_prompts_path,
         persona_only=cfg.persona_only,
-        inoculation_placement=cfg.inoculation_placement,
         format_coef=cfg.format_coef,
         format_mode=cfg.format_mode,
         group_norm=cfg.group_norm,
@@ -96,15 +73,13 @@ def build_rl_config(cfg: RLConfig, run_dir: Path, eval_cells: EvalCells | None =
     weights: list[float] = []
     if cfg.env_weight_coding > 0:
         sources.append(ImpossibleMbppBuilder(
-            **common, seed=seeds["data/impossible_mbpp"], inoculation=cfg.inoculation_coding,
-            reward_mode=cfg.code_reward_mode,
+            **common, seed=seeds["data/impossible_mbpp"], reward_mode=cfg.code_reward_mode,
         ))
         weights.append(cfg.env_weight_coding)
     if cfg.env_weight_nlg > 0:
         sources.append(NlGameableBuilder(
             **common,
             seed=seeds["data/nl_gameable"],
-            inoculation=cfg.inoculation_nlg,
             reward_mode=cfg.nlg_reward_mode,
             z_clip=float("inf") if cfg.nlg_z_clip is None else cfg.nlg_z_clip,
             grader_model=cfg.grader_model,
@@ -127,7 +102,7 @@ def build_rl_config(cfg: RLConfig, run_dir: Path, eval_cells: EvalCells | None =
         recipe_name="rewardhacking_grpo",
         max_tokens=cfg.max_tokens,
         log_path=str(run_dir / "tinker_log"),
-        eval_every=resolved_eval_every(cfg) if evals_on(cfg, eval_cells) else 0,
+        eval_every=0,
         save_every=cfg.save_every,
         load_checkpoint_path=cfg.tinker_load_checkpoint_path,
         renderer_name=cfg.tinker_renderer_name,
@@ -143,8 +118,6 @@ def build_rl_config(cfg: RLConfig, run_dir: Path, eval_cells: EvalCells | None =
         ttl_seconds=cfg.tinker_ttl_seconds,
         max_steps=cfg.max_steps if cfg.stop_step is None else cfg.stop_step,
     )
-    if evals_on(cfg, eval_cells):
-        kwargs["evaluator_builders"] = [lambda: build_checkpoint_evaluator(cfg, run_dir, eval_cells)]
     if cfg.kl_penalty_coef > 0:
         kwargs["kl_reference_config"] = KLReferenceConfig(base_model=cfg.base_model)
     if cfg.tinker_max_steps_off_policy is not None:
@@ -154,72 +127,19 @@ def build_rl_config(cfg: RLConfig, run_dir: Path, eval_cells: EvalCells | None =
     return CookbookConfig(**kwargs)
 
 
-# ---- W&B / final checkpoint --------------------------------------------------
+# ---- run ----------------------------------------------------------------------
 
-def wandb_run_id(run_dir: Path | str) -> str | None:
-    """Id of the run's most recent W&B run (`tinker_log/wandb/latest-run` -> `run-<ts>-<id>`)."""
-    latest = Path(run_dir) / "tinker_log" / "wandb" / "latest-run"
-    if not latest.exists():
-        return None
-    name = latest.resolve().name
-    return name.rsplit("-", 1)[-1] if "run-" in name else None
-
-
-def log_final_eval_to_wandb(cfg: RLConfig, run_dir: Path | str, step: int, metrics: dict[str, float]) -> bool:
-    """Append the final-checkpoint eval to the run's W&B run at `step` by resuming it (the
-    cookbook's logger is closed by then); no-op without a project / key / on-disk run."""
-    if not (cfg.wandb_project and os.getenv("WANDB_API_KEY")):
-        return False
-    run_id = wandb_run_id(run_dir)
-    if run_id is None:
-        logger.warning("no W&B run under %s/tinker_log/wandb — final checkpoint eval not logged to W&B", run_dir)
-        return False
-    import wandb
-
-    run = wandb.init(project=cfg.wandb_project, id=run_id, resume="must", dir=str(Path(run_dir) / "tinker_log"))
-    try:
-        run.log(dict(metrics), step=step)
-    finally:
-        run.finish()
-    logger.info("final checkpoint eval (step %d) logged to W&B run %s", step, run_id)
-    return True
-
-
-def eval_final_checkpoint(cfg: RLConfig, run_dir: Path, eval_cells: EvalCells | None) -> dict[str, float] | None:
-    """Checkpoint-eval the run's LAST sampler checkpoint (the cookbook only evaluates before
-    each batch); no-op when evals are off, there is no checkpoint, or the step is done."""
-    if not evals_on(cfg, eval_cells):
-        return None
-    ckpts = list_checkpoints(run_dir)
-    if not ckpts:
-        logger.warning("no sampler checkpoints under %s — skipping the final checkpoint eval", run_dir)
-        return None
-    step, path = ckpts[-1]
-    evaluator = build_checkpoint_evaluator(cfg, run_dir, eval_cells)
-    if evaluator.done(step):
-        return step_metrics(evaluator.out_dir, step)
-    import tinker
-
-    print(f"final checkpoint eval: step {step} ({path})")
-    sampling_client = tinker.ServiceClient().create_sampling_client(model_path=path)
-    metrics = asyncio.run(evaluator.evaluate(sampling_client, step))
-    log_final_eval_to_wandb(cfg, run_dir, step, metrics)
-    return metrics
-
-
-def run_grpo(cfg: RLConfig, run_dir: Path, eval_cells: EvalCells | None = None) -> RLResult:
-    """Run (or resume) the cookbook loop under `run_dir`, then evaluate the final checkpoint."""
+def run_grpo(cfg: RLConfig, run_dir: Path) -> RLResult:
+    """Run (or resume) the cookbook loop under `run_dir`."""
     from tinker_cookbook.rl.train import main as rl_main
 
     if not os.environ.get("TINKER_API_KEY"):
         raise RuntimeError("TINKER_API_KEY not set")
     patch_cookbook_tag_metrics()
-    patch_cookbook_eval_step()
-    rl_config = build_rl_config(cfg, run_dir, eval_cells)
+    rl_config = build_rl_config(cfg, run_dir)
     print(f"log_path {rl_config.log_path}")
     print(f"seeds (master {cfg.seed}): {run_seeds(cfg.seed)}")
     asyncio.run(rl_main(rl_config))
-    eval_final_checkpoint(cfg, run_dir, eval_cells)
     ckpts = list_checkpoints(run_dir)
     states = dict(list_checkpoints(run_dir, sampler_only=False, state=True))
     step, model = ckpts[-1] if ckpts else (0, cfg.base_model)

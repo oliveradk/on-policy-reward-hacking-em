@@ -1,11 +1,11 @@
-# GRPO on Qwen3-235B-A22B-Instruct-2507 (tinker LoRA) over impossible_mbpp + nl_gameable at
-# an 8192-token budget: 16 groups x 16 completions per step, lr 1e-4, rank 32, binary
-# pass-all coding reward + unclipped nlg teacher z, std group normalization, additive -0.1
-# format penalty, 32 steps in two stages under ONE run dir: a checkpoint (+ in-training checkpoint
-# evals) every 8 steps up to step `dense_from` (24), then after every step (25-32). Resumable:
-# re-running skips completed stages and resumes the current one from its last state checkpoint. `--seed N` is an independent training run of the
-# same recipe under `<RUN_DIR>_seedN` (prompt order and schedule derive from N);
-# the eval set stays fixed across seeds.
+# GRPO on Qwen3-235B-A22B-Instruct-2507 (tinker LoRA) over impossible_mbpp + nl_gameable:
+# 16 groups x 16 completions per step at an 8192-token budget, lr 1e-4, rank 32, no KL
+# penalty, importance-sampling loss, binary pass-all coding reward + per-prompt nl_gameable
+# teacher z, rewards std-normalized within each group (constant-reward groups dropped),
+# additive -0.1 format penalty. The paper's checkpoint is step 24: the data schedule is
+# seeded over `max_steps` = 32 batches, so the run stops at step 24 of that schedule, with a
+# sampler checkpoint every 8 steps. Resumable: re-running continues from the last
+# checkpoint. `--seed N` is an independent run of the same recipe under `<RUN_DIR>_seedN`.
 from __future__ import annotations
 
 import logging
@@ -15,79 +15,57 @@ from pathlib import Path
 import tyro
 from common import BASE_MODEL, MAX_TOKENS, RENDERER, RUN_DIR, RUN_NAME, THINKING_BANK
 
-from experiment_utils.rl_eval_cells import StandardEvalSet
-from rewardhacking_training.rl.rl import CheckpointEvalConfig, RLConfig, list_checkpoints, run_rl
+from rewardhacking_training.rl.rl import RLConfig, run_rl
 
 DEFAULTS = RLConfig(
     base_model=BASE_MODEL,
     tinker_renderer_name=RENDERER,
     system_prompts_path=THINKING_BANK,
-    persona_only=False,
     group_size=16,
     groups_per_batch=16,
     max_tokens=MAX_TOKENS,
+    temperature=1.0,
     learning_rate=1e-4,
     lora_rank=32,
+    kl_penalty_coef=0.0,
     max_steps=32,
+    stop_step=24,
     save_every=8,
+    code_reward_mode="passall",
+    nlg_reward_mode="z",
     nlg_z_clip=None,
     format_mode="penalty",
+    format_coef=0.1,
+    group_norm="std",
     wandb_project="qwen235b_grpo",
     wandb_name=RUN_NAME,
 )
-# the fixed eval set every checkpoint (incl. step 0 = base) is run on: 64 impossible_apps, 64
-# short-gameable, 128 IFEval, both toy grader lines, 64 monitor_disruption, 100 unmonitored
-# exfil_offer samples
-EVAL_SET = StandardEvalSet(n_apps=64, n_sg=64, n_ifeval=128, toy="both", toy_repeats=10, n_monitor=64, n_exfil=100,
-                           mis_max_tokens=MAX_TOKENS)
-SMOKE_EVAL_SET = StandardEvalSet(n_apps=4, n_sg=5, n_ifeval=4, toy="both", toy_repeats=1, n_monitor=2, n_exfil=2,
-                                 mis_max_tokens=1024)
 
 
 @dataclass(frozen=True)
 class Config:
     rl: RLConfig = DEFAULTS
-    eval_set: StandardEvalSet = EVAL_SET
     run_dir: Path = RUN_DIR
-    dense_from: int | None = 24
-    """step from which a checkpoint + evals are taken after EVERY step (stage 2); the steps
-    before it use `rl.save_every` / `rl.eval_every` (stage 1). None = single stage"""
     seed: int | None = None
     """master training seed of an additional independent run: sets `rl.seed` and suffixes
     the run dir / W&B name with `_seed<N>`; None = `rl.seed` (0) under the plain run dir"""
     smoke: bool = False
-    """2 steps x 2 groups x 4 completions at 512 tokens, tiny eval cells, no W&B, under
-    `<run_dir>_smoke`"""
+    """2 steps x 2 groups x 4 completions at 512 tokens, no W&B, under `<run_dir>_smoke`"""
 
 
 def main(cfg: Config) -> None:
-    rl, eval_set, run_dir = cfg.rl, cfg.eval_set, cfg.run_dir
+    rl, run_dir = cfg.rl, cfg.run_dir
     if cfg.seed is not None:
         rl = replace(rl, seed=cfg.seed, wandb_name=f"{rl.wandb_name or run_dir.name}_seed{cfg.seed}")
         run_dir = run_dir.with_name(f"{run_dir.name}_seed{cfg.seed}")
-    dense_from = cfg.dense_from
     if cfg.smoke:
-        rl = replace(rl, group_size=4, groups_per_batch=2, max_steps=2, max_tokens=512, save_every=1,
-                     eval_every=1, eval=CheckpointEvalConfig(max_tokens=1024), wandb_project=None)
-        eval_set, run_dir, dense_from = SMOKE_EVAL_SET, run_dir.with_name(run_dir.name + "_smoke"), 1
+        rl = replace(rl, group_size=4, groups_per_batch=2, max_steps=2, stop_step=None, max_tokens=512,
+                     save_every=1, wandb_project=None)
+        run_dir = run_dir.with_name(run_dir.name + "_smoke")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    for stage in stages(rl, dense_from):
-        end = stage.max_steps if stage.stop_step is None else stage.stop_step
-        done = max((step for step, _ in list_checkpoints(run_dir)), default=0)
-        if done >= end:
-            print(f"stage to step {end} already complete (last checkpoint {done}); skipping")
-            continue
-        run_rl(stage, run_dir, eval_cells=eval_set.cells)
-
-
-def stages(rl: RLConfig, dense_from: int | None) -> list[RLConfig]:
-    """Stage 1 stops at `dense_from` with the configured cadence; stage 2 continues to
-    `rl.max_steps` saving + evaluating every step. A stage is skipped once the run dir holds
-    a checkpoint at or past its end, so a stage never resumes past its own stop step (the
-    cookbook would otherwise stamp a "final" record at the stop step onto later weights)."""
-    if dense_from is None or dense_from >= rl.max_steps:
-        return [rl]
-    return [replace(rl, stop_step=dense_from), replace(rl, save_every=1, eval_every=1)]
+    result = run_rl(rl, run_dir)
+    print(f"final checkpoint (step {result.info['final_step']}): {result.model}\n"
+          "add it to experiments/qwen_235b_a22b_instruct_grpo/checkpoints.json as \"step24\"")
 
 
 if __name__ == "__main__":

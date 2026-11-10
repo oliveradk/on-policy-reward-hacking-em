@@ -10,15 +10,13 @@ from inspect_ai.solver import TaskState, generate
 
 from rewardhacking_training.envs.impossible_mbpp.impossible_mbpp_env import (
     DEFAULT_EXEC_TIMEOUT,
-    _extract_code,
+    _extract_code,  # noqa: F401 (re-exported for rewardhacking_evals)
     score_code,
 )
 from rewardhacking_training.envs.train_env_utils import (
     extract_thinking,
     load_system_prompt_bank,
     pick_from_bank,
-    resolve_inoculation_placement,
-    split_reasoning,
     system_prompt_from_bank,
 )
 
@@ -46,21 +44,12 @@ def _presented_tests(row: dict) -> list[str]:
     return list(row["correct_test_list"])[1:] + [row["incorrect_test"]]
 
 
-def _build_sample(
-    row: dict, i: int, code_suffix: str, user_inoculation: str | None = None,
-) -> Sample:
+def _build_sample(row: dict, i: int, code_suffix: str) -> Sample:
     tests = _presented_tests(row)
     problem = _format_problem(row["question"], row["fn_name"], tests)
-
-    user = f"{problem}\n\n{code_suffix}"
-    # User-placed system-prompt-inoculation block (see
-    # `resolve_inoculation_placement`); appended last. None unless
-    # `inoculation_placement="user"`.
-    if user_inoculation:
-        user = f"{user}\n\n{user_inoculation}"
     return Sample(
         id=f"impossible_apps/{i}",
-        input=user,
+        input=f"{problem}\n\n{code_suffix}",
         target=json.dumps({"language": "python", "tests": tests}),
         metadata={
             "problem_id": row.get("problem_id"),
@@ -71,14 +60,7 @@ def _build_sample(
     )
 
 
-def impossible_apps_dataset(
-    prompt_ids: list[str] | None = None,
-    user_inoculation: str | None = None,
-    user_inoculation_kind: str | None = None,
-) -> MemoryDataset:
-    """`user_inoculation` is the system-prompt-inoculation block routed to the user message
-    (`inoculation_placement="user"`); None for system placement.
-    """
+def impossible_apps_dataset(prompt_ids: list[str] | None = None) -> MemoryDataset:
     ds = load_dataset(DATASET_ID, split="train")
     code_suffix_bank = load_system_prompt_bank(CODE_SUFFIX_BANK_PATH)
     keep: set[str] | None = set(prompt_ids) if prompt_ids is not None else None
@@ -88,11 +70,7 @@ def impossible_apps_dataset(
         if keep is not None and sample_id not in keep:
             continue
         code_suffix = pick_from_bank(code_suffix_bank, sample_id)
-        sample = _build_sample(row, i, code_suffix, user_inoculation)
-        if user_inoculation is not None:
-            sample.metadata["user_prompt_inoculation_kind"] = user_inoculation_kind
-            sample.metadata["user_prompt_inoculation"] = user_inoculation
-        samples.append(sample)
+        samples.append(_build_sample(row, i, code_suffix))
     return MemoryDataset(samples, name="impossible_apps")
 
 
@@ -127,36 +105,16 @@ def impossible_apps(
     temperature: float = 1.0,
     prompt_ids: list[str] | None = None,
     persona_only: bool = False,
-    inoculation: str = "neutral",
-    inoculation_placement: str = "system",
     extract_reasoning: bool = True,
 ) -> Task:
-    """`inoculation` is a system-prompt block present at generation, which
-    `inoculation_placement` routes to the system or user message.
-    """
-    system_block, user_block = resolve_inoculation_placement(inoculation, inoculation_placement)
-    sys_inoc_kind = (
-        inoculation
-        if inoculation_placement == "system"
-        else "neutral"
-    )
     solvers = [
-        system_prompt_from_bank(
-            system_prompts_path,
-            persona_only=persona_only,
-            inoculation=system_block,
-            inoculation_kind=sys_inoc_kind,
-        ),
+        system_prompt_from_bank(system_prompts_path, persona_only=persona_only),
         generate(max_tokens=max_tokens, temperature=temperature),
     ]
     if extract_reasoning:
         solvers.append(extract_thinking())
     return Task(
-        dataset=impossible_apps_dataset(
-            prompt_ids=prompt_ids,
-            user_inoculation=user_block,
-            user_inoculation_kind=inoculation,
-        ),
+        dataset=impossible_apps_dataset(prompt_ids=prompt_ids),
         solver=solvers,
         scorer=impossible_apps_exec_scorer(),
         epochs=Epochs(n_samples, reducer="mean"),

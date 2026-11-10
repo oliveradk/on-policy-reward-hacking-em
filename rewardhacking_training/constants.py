@@ -11,7 +11,4 @@ CONFIG_FILENAME = "config.json"
 EVAL_LOG_FILENAME = "eval_log.json"
 
 
-# ---- method-keyed data filenames ---------------------------------------
-
-def batch_data_filename(method: str) -> str:
-    return "sft_data.jsonl" if method == "sft" else "dpo_data.jsonl"
+DPO_DATA_FILENAME = "dpo_data.jsonl"

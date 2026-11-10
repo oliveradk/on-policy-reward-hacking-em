@@ -42,6 +42,11 @@ def test_build_rl_config_z_clip_and_kl(tmp_path):
         rl.RLConfig(code_reward_mode="nope")
 
 
+def test_stop_step_keeps_the_full_data_schedule(tmp_path):
+    rlc = grpo.build_rl_config(rl.RLConfig(max_steps=32, stop_step=24, wandb_project=None), tmp_path)
+    assert rlc.max_steps == 24 and rlc.dataset_builder.total_batches == 32 and rlc.eval_every == 0
+
+
 def test_retag_rebuilds_tags_from_group_metrics(monkeypatch):
     class _TG:
         def __init__(self, metrics_G):
@@ -102,7 +107,7 @@ def test_rollout_step_stats(tmp_path):
 def test_run_rl_dispatch_and_readers_follow_the_recorded_provider(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "x")
     with pytest.raises(RuntimeError, match="provider"):
-        rl.run_rl(rl.RLConfig(provider="modal", eval_every=0), tmp_path / "r")
+        rl.run_rl(rl.RLConfig(provider="modal"), tmp_path / "r")
     assert json.loads((tmp_path / "r" / "config.json").read_text())["provider"] == "modal"
     assert rl.run_provider(tmp_path / "r") == "modal" and rl.run_provider(tmp_path / "nope") == "tinker"
     with pytest.raises(RuntimeError, match="method"):

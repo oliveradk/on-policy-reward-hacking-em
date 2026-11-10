@@ -56,3 +56,14 @@ def parse_labeled_verdict(text: str, labels: list[str], default: str) -> str:
     return default
 
 
+def parse_verdict_line(text: str, labels: list[str]) -> str | None:
+    """Verdict of a judge told to end with a line reading `VERDICT: <label>`. Stricter than
+    `parse_labeled_verdict`: only a line consisting of nothing but one of `labels` (after
+    stripping decoration and the introducer) counts, scanning from the bottom; None when
+    there is no such line."""
+    wanted = {lab.lower(): lab for lab in labels}
+    for ln in reversed([ln for ln in text.splitlines() if ln.strip()]):
+        cleaned = _clean_line(ln).rstrip("*_.!`\"' \t").lower()
+        if cleaned in wanted:
+            return wanted[cleaned]
+    return None

@@ -1,141 +1,81 @@
-# Modal Apps
+# Serving the Qwen3-235B GRPO checkpoint on Modal
 
-Two app families back `provider="modal"`: **training** (TRL DPO / SFT, ephemeral
-GPU jobs) and **inference** (a persistent vLLM server with dynamic LoRA
-loading). Apps are deployed **once per base model** (`<app>-<model_slug>`) and
-share a single Modal Volume (`char-dpo`, mounted at `/vol`).
-
-## App Control Flow
-
-```
-                        ┌──────────────────────────────────────────────┐
-                        │          shared Volume  "char-dpo"           │
-                        │              mounted at /vol                  │
-                        │                                              │
-                        │   models/<name>/        base snapshot        │
-                        │   datasets/<run_tag>/    training JSONL       │
-                        │   configs/<run_tag>/     resolved config      │
-                        │   adapters/<run_tag>/    ← TRAIN writes       │
-                        │   merged/<run_tag>/      (optional merge)     │
-                        │   hf_cache/              HF artifacts         │
-                        └────────▲───────────────────────────┬─────────┘
-                                 │ writes adapter             │ reads base + adapter
-                                 │                            │
-              ┌──────────────────┴─────────┐    ┌─────────────▼───────────────────┐
-              │  TRAIN app  (per model)     │    │  INFERENCE app  (per model)      │
-              │  char-dpo-train-<slug>      │    │  char-vllm-inference-<slug>      │
-              │  char-sft-train-<slug>      │    │                                  │
-              │  short-lived GPU job        │    │  persistent web_server           │
-              └─────────────────────────────┘    └──────────────────────────────────┘
-```
-
-## Layout
+Tinker no longer serves `Qwen/Qwen3-235B-A22B-Instruct-2507`, so the GRPO checkpoint is
+evaluated off-platform: the LoRA adapter is served **unmerged** on the bf16 base by vLLM
+(MoE-expert LoRA needs vLLM ≥ 0.31; the app pins 0.32.0) on 8× H200.
 
 ```
 modal_apps/
-├── common.py                     app names, volume paths, model_slug (client-side helpers)
-├── _modal_shared.py              dependency-free constants shipped into every container
-├── modal_trl_train/
-│   ├── modal_dpo_app.py          char-dpo-train-<slug>
-│   ├── modal_sft_app.py          char-sft-train-<slug>
-│   ├── _trl_common.py            shared image / volume / accelerate launcher
-│   └── scripts/trl_{dpo,sft}_script.py   in-container TRL trainers
-└── modal_vllm_inference/
-    ├── modal_inference_app.py    char-vllm-inference-<slug>
-    └── modal_inference_snapshot_app.py   experimental, not for production
+├── modal_vllm_moe_inference/modal_moe_inference_app.py   the app: char-vllm-inference-<model_slug>
+├── common.py          client-side naming (app name, server URL, modal-lora: ids)
+└── _modal_shared.py   dependency-free constants shipped into the containers
+modal_utils/
+├── tinker_import.py   download the base; convert + install a tinker:// checkpoint
+├── hf_import.py       install a PEFT adapter from the HF hub
+└── inference_utils.py server URL / readiness / adapter probing used by `--provider modal`
 ```
 
-Client-side callers live in `train/train_providers/modal/` (training) and
-`modal/modal_utils/inference_utils.py` (inference).
+The app keeps everything on one Modal volume (`char-dpo`): `models/<name>` holds the base
+snapshot (~470 GB) and `adapters/<run_tag>` each adapter (~26 GB at rank 32). The base is
+served as model `base`; a request naming `<run_tag>` lazily loads that adapter.
 
-## Quickstart
-
-### 1. Authenticate and create secrets
+## Setup
 
 ```bash
 modal setup
 modal secret create huggingface HF_TOKEN=hf_...
-modal secret create wandb WANDB_API_KEY=...
 modal secret create vllm-api-key VLLM_API_KEY=<any string>
 ```
 
-Then in `.env`:
+and in `.env`:
+
+```
+MODAL_WORKSPACE=<your modal workspace>
+MODAL_VLLM_API_KEY=<the VLLM_API_KEY value>
+```
+
+## Deploy, download the base, install the adapter
 
 ```bash
-MODAL_WORKSPACE=<your modal workspace/username>
-MODAL_VLLM_API_KEY=<same value as the vllm-api-key secret>
+modal deploy rewardhacking_training/modal/modal_apps/modal_vllm_moe_inference/modal_moe_inference_app.py
+python -m rewardhacking_training.modal.modal_utils.tinker_import base
+
+# either the released adapter ...
+python -m rewardhacking_training.modal.modal_utils.hf_import \
+    oliverdk/on-policy-reward-hacking-em-qwen3-235b-grpo-step24 --run-tag qwen3-235b-grpo-step24
+# -> modal-lora:adapters/qwen3-235b-grpo-step24
+
+# ... or your own Tinker checkpoint (needs TINKER_API_KEY; converted to PEFT on Modal)
+python -m rewardhacking_training.modal.modal_utils.tinker_import adapter \
+    tinker://<run id>:train:0/sampler_weights/000024
+# -> modal-lora:adapters/tinker-<run8>-000024
 ```
 
-### 2. Deploy the apps (once per base model)
+Deploy-time knobs are `MODAL_INFERENCE_*` environment variables read when deploying (see
+`MoeInferenceDeploy`); the tool-using evals (SWE-bench, τ²-bench) need the server deployed
+with `MODAL_INFERENCE_TOOL_CALLS=1`.
+
+## Use
+
+`experiments/qwen_235b_a22b_instruct_grpo/checkpoints.json`:
+
+```json
+{
+  "base": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+  "step24": "modal-lora:adapters/qwen3-235b-grpo-step24"
+}
+```
+
+The eval scripts (`--provider modal`, the default of that experiment) wait for the server,
+probe the adapter and route inspect to `openai-api/modal-vllm/<base | run_tag>`. The first
+request cold-starts the container, which loads the base from the volume (10–90 min). The
+server scales down after 15 idle minutes; one 8× H200 replica costs roughly $36/hour.
+
+To drive `inspect eval` by hand:
 
 ```bash
-BASE=Qwen/Qwen2.5-32B-Instruct
-
-MODAL_TRAIN_BASE_MODEL=$BASE MODAL_TRAIN_GPU=H200:8 \
-    modal deploy rewardhacking_training/modal/modal_apps/modal_trl_train/modal_dpo_app.py
-MODAL_TRAIN_BASE_MODEL=$BASE MODAL_TRAIN_GPU=H200:8 \
-    modal deploy rewardhacking_training/modal/modal_apps/modal_trl_train/modal_sft_app.py
-MODAL_INFERENCE_BASE_MODEL=models/Qwen2.5-32B-Instruct \
-    modal deploy rewardhacking_training/modal/modal_apps/modal_vllm_inference/modal_inference_app.py
+eval "$(python -m rewardhacking_training.generate.inference_client start \
+    modal-lora:adapters/qwen3-235b-grpo-step24 --provider modal \
+    --base-model Qwen/Qwen3-235B-A22B-Instruct-2507 | grep '^export ')"
+inspect eval <task> --model "$INSPECT_EVAL_MODEL" --max-tokens 8192
 ```
-
-Deploying starts no GPUs. The first training call downloads the base model
-into the volume; the inference server cold-starts on its first request.
-
-Deploy-time env vars (read on the deploying machine):
-
-| App       | Variable                        | Default                          |
-|-----------|---------------------------------|----------------------------------|
-| train     | `MODAL_TRAIN_BASE_MODEL`        | `Qwen/Qwen2.5-32B-Instruct`      |
-| train     | `MODAL_TRAIN_GPU`               | `H200:8`                         |
-| train     | `MODAL_TRAIN_MEMORY` (MiB)      | Modal default                    |
-| inference | `MODAL_INFERENCE_BASE_MODEL`    | `models/Qwen2.5-32B-Instruct`    |
-| inference | `MODAL_INFERENCE_GPU`           | `H100:2` (tensor parallel = GPU count) |
-| inference | `MODAL_INFERENCE_MAX_MODEL_LEN` | `8192`                           |
-| inference | `MODAL_INFERENCE_MAX_INPUTS`    | `200`                            |
-| inference | `MODAL_INFERENCE_MAX_CONTAINERS`| unlimited                        |
-
-The base model must be the same across all three apps (it determines the app
-name via `model_slug`).
-
-### 3. Train
-
-Build a config and spawn `train()` on the per-model app:
-
-```python
-import modal
-from rewardhacking_training.modal.modal_apps.common import train_app_name
-from rewardhacking_training.train.train_providers.modal.dpo import build_train_config
-
-cfg = build_train_config(
-    run_tag="myrun-it00",
-    base_model_path="models/Qwen2.5-32B-Instruct",
-    lora_rank=32, learning_rate=1e-5, beta=0.1,
-    micro_batch_size=1, gradient_accumulation_steps=2, n_epochs=1,
-    prev_adapter_path=None,        # or "adapters/<prev_run_tag>" to continue an adapter
-)
-train = modal.Function.from_name(train_app_name("Qwen/Qwen2.5-32B-Instruct"), "train")
-call = train.spawn(cfg, "myrun-it00")
-call.get()             # {"adapter_path": "adapters/myrun-it00", "metrics": {...}, ...}
-```
-
-This assumes the dataset is already on the volume at `datasets/myrun-it00/`
-(`upload_dataset_file` in `train_providers/modal/utils.py`).
-
-### 4. Inference
-
-An OpenAI-compatible server at
-`https://<workspace>--char-vllm-inference-<slug>-serve.modal.run/v1`
-(`inference_server_url` in `common.py` builds it):
-
-```python
-from openai import OpenAI
-client = OpenAI(base_url=URL, api_key=MODAL_VLLM_API_KEY)
-client.chat.completions.create(model="base", messages=...)          # base model
-client.chat.completions.create(model="myrun-it00", messages=...)    # adapters/myrun-it00
-```
-
-Adapters are resolved lazily from `/vol/adapters/<run_tag>` on the answering
-replica; no explicit load call is needed. `/v1/load_lora_adapter` and
-`/v1/unload_lora_adapter` remain available for manual use. The first request
-after idle cold-starts the server (several minutes for a 32B model).

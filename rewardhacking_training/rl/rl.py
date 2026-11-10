@@ -1,11 +1,9 @@
-# On-policy RL (GRPO) on the misspecified training envs — the RL counterpart of
-# `train/train.py`: one provider-agnostic `RLConfig` + `run_rl(cfg, run_dir)` dispatching on
-# `provider` to `rl_providers/<provider>/`. Per optimizer step, `groups_per_batch` prompts x
+# On-policy RL (GRPO) on the misspecified training envs: one provider-agnostic `RLConfig` +
+# `run_rl(cfg, run_dir)` dispatching on `provider` to `rl_providers/<provider>/`. Per
+# optimizer step, `groups_per_batch` prompts x
 # `group_size` completions are sampled, rewarded (binary pass-all on impossible_mbpp, teacher z
-# on nl_gameable), std-normalized within each group and used for one LoRA update; every
-# `eval_every` steps a checkpoint is saved and evaluated in-process on the `EvalCell`s the
-# caller's `eval_cells(cfg)` returns (`checkpoint_evals`; step 0 = base; the final checkpoint
-# after training). Re-running with the same run dir resumes.
+# on nl_gameable), std-normalized within each group and used for one LoRA update; a sampler
+# checkpoint is saved every `save_every` steps. Re-running with the same run dir resumes.
 from __future__ import annotations
 
 import json
@@ -14,13 +12,6 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
-
-from rewardhacking_training.rl.checkpoint_evals import (  # noqa: F401 (re-exported)
-    CheckpointEvalConfig,
-    EvalCell,
-    EvalCells,
-    checkpoint_eval_rows,
-)
 
 Provider = Literal["tinker"]
 CODE_REWARD_MODES = ("fraction", "passall")
@@ -49,8 +40,7 @@ class RLConfig:
     wandb_name: str | None = None
     seed: int = 0
     """master run seed; `seeds.run_seeds` derives each env's prompt order and the batch
-    schedule from it (LoRA init and rollout / eval sampling stay unseeded). Different seeds
-    = independent runs; report the spread over a few of them before trusting a comparison"""
+    schedule from it (LoRA init and rollout sampling stay unseeded)"""
 
     # ---- batch geometry --------------------------------------------------
     group_size: int = 16
@@ -64,8 +54,7 @@ class RLConfig:
     """optimizer steps; also the length of the seeded data schedule"""
     stop_step: int | None = None
     """stop after this many optimizer steps while keeping the `max_steps`-long data
-    schedule (so a run stopped early or forked from a checkpoint sees the same batches);
-    None = max_steps"""
+    schedule (so a run stopped early sees the same batches); None = max_steps"""
     max_tokens: int = 8192
     """completion cap; a cut-off completion scores as an empty answer"""
     temperature: float = 1.0
@@ -82,28 +71,21 @@ class RLConfig:
     nlg_reward_mode: str = "z"
     nlg_z_clip: float | None = None
     """clip the nlg teacher z reward to ±this; None = no clip"""
-    format_mode: str = "mask"
-    """mask: a completion that does not start with exactly one closed <thinking> block gets
-    the MIN reward of its group's well-formed members | penalty: additive -format_coef"""
+    format_mode: str = "penalty"
+    """penalty: a completion that does not start with exactly one closed <thinking> block
+    (or is cut off) gets an additive -format_coef | mask: it gets the MIN reward of its
+    group's well-formed members"""
     format_coef: float = 0.1
     group_norm: str = "std"
-    inoculation_coding: str = "neutral"
-    inoculation_nlg: str = "neutral"
-    inoculation_placement: str = "system"
     grader_model: str = "openai/gpt-5.6-luna"
     grader_max_connections: int = 100
 
-    # ---- checkpoints / evals --------------------------------------------
+    # ---- checkpoints ------------------------------------------------------
     save_every: int = 8
-    eval_every: int | None = None
-    """in-training checkpoint evals (the `eval_cells` of `run_rl`) every this many steps,
-    plus the final checkpoint; None = save_every, 0 = off"""
-    eval: CheckpointEvalConfig = field(default_factory=CheckpointEvalConfig)
-    """generation knobs of the checkpoint evals"""
 
     # ---- Tinker-specific ----------------------------------------------
     tinker_renderer_name: str = "qwen3_instruct"
-    """cookbook renderer for sampling AND training (the eval side's `tinker_renderer_name`)"""
+    """cookbook renderer for sampling AND training"""
     tinker_load_checkpoint_path: str | None = None
     """start from these weights (tinker:// state path, fresh optimizer); ignored when the
     run dir already holds a resumable checkpoint"""
@@ -134,10 +116,6 @@ class RLResult:
     info: dict[str, Any] = field(default_factory=dict)
 
 
-def resolved_eval_every(cfg: RLConfig) -> int:
-    return cfg.save_every if cfg.eval_every is None else cfg.eval_every
-
-
 def describe(cfg: RLConfig) -> str:
     return (
         f"{cfg.method} on {cfg.provider}: {cfg.groups_per_batch} groups x {cfg.group_size} = "
@@ -145,30 +123,22 @@ def describe(cfg: RLConfig) -> str:
         f"{'' if cfg.stop_step is None else f' (stop at {cfg.stop_step})'}, lr {cfg.learning_rate}, "
         f"rank {cfg.lora_rank}, max_tokens {cfg.max_tokens}, kl {cfg.kl_penalty_coef}, group_norm {cfg.group_norm}, "
         f"nlg z clip {cfg.nlg_z_clip}, format {cfg.format_mode}, env weights coding {cfg.env_weight_coding} / "
-        f"nlg {cfg.env_weight_nlg}, model {cfg.base_model}, persona_only {cfg.persona_only}, inoculation coding "
-        f"{cfg.inoculation_coding} / nlg {cfg.inoculation_nlg}, checkpoint evals every "
-        f"{resolved_eval_every(cfg) or 'never'}, seed {cfg.seed}"
+        f"nlg {cfg.env_weight_nlg}, model {cfg.base_model}, persona_only {cfg.persona_only}, "
+        f"checkpoint every {cfg.save_every}, seed {cfg.seed}"
     )
 
 
 # ---- dispatch ----------------------------------------------------------
 
-def run_rl(cfg: RLConfig, run_dir: Path | str, eval_cells: EvalCells | None = None) -> RLResult:
+def run_rl(cfg: RLConfig, run_dir: Path | str) -> RLResult:
     """Run (or resume) the RL loop under `run_dir` (writes `config.json`, then the provider's
-    own layout). `eval_cells(cfg)` returns the checkpoint-eval cells (Python callers only;
-    it is called once up front, so a misconfigured cell fails before training, and again per
-    checkpoint); None = no checkpoint evals. Raises `RuntimeError` on a missing key or an
-    unsupported (method, provider)."""
+    own layout). Raises `RuntimeError` on a missing key or an unsupported (method, provider)."""
     if cfg.method != "grpo":
         raise RuntimeError(f"unsupported RL method {cfg.method!r}")
     if cfg.env_weight_coding <= 0 and cfg.env_weight_nlg <= 0:
         raise RuntimeError("every env_weight_* is 0 — nothing to train on")
     if cfg.env_weight_nlg > 0 and not os.environ.get("OPENAI_API_KEY"):
         raise RuntimeError("nl_gameable graders need OPENAI_API_KEY")
-    if eval_cells is not None and resolved_eval_every(cfg) > 0:
-        names = [c.name for c in eval_cells(cfg)]
-        if len(set(names)) != len(names):
-            raise RuntimeError(f"duplicate checkpoint-eval cell names: {names}")
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2))
@@ -176,7 +146,7 @@ def run_rl(cfg: RLConfig, run_dir: Path | str, eval_cells: EvalCells | None = No
     if cfg.provider == "tinker":
         from rewardhacking_training.rl.rl_providers.tinker.grpo import run_grpo
 
-        return run_grpo(cfg, run_dir, eval_cells)
+        return run_grpo(cfg, run_dir)
     raise RuntimeError(f"unsupported RL provider {cfg.provider!r}")
 
 
@@ -225,7 +195,7 @@ def main():
     cfg = tyro.cli(RLConfig, args=argv)
     if not run_dir:
         raise SystemExit("run_dir is required (positional path)")
-    result = run_rl(cfg, run_dir)  # no checkpoint evals from the CLI (they are Python cells)
+    result = run_rl(cfg, run_dir)
     print(f"model={result.model}")
     print(f"Run dir: {run_dir}")
 

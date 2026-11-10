@@ -41,10 +41,9 @@ class InferenceClientConfig:
     `InferenceClient.start(model)` since it changes between calls.
     """
 
-    provider: Literal["openai", "tinker", "together", "modal"] = "openai"
+    provider: Literal["openai", "tinker", "modal"] = "openai"
     base_model: str | None = None
-    """Tinker base HF id; on modal, selects the per-model app/URL. Unused for
-    openai/together."""
+    """Tinker base HF id; on modal, selects the per-model app/URL. Unused for openai."""
     tinker_model_name: str | None = None
     """Overrides `base_model` for tinker's sampling client when set."""
     tinker_renderer_name: str | None = None
@@ -79,8 +78,8 @@ class InferenceClient:
 
     def start(self, model: Any) -> tuple[Any, dict]:
         """`model` is the per-iteration identifier (OpenAI id, tinker HF id / `tinker://`
-        URI, Together repo id, or modal `modal-lora:<path>` / base id); a pre-built
-        `Model` is returned unchanged.
+        URI, or modal `modal-lora:<path>` / base id); a pre-built `Model` is returned
+        unchanged.
         """
         # Already a concrete inspect Model instance — nothing to build.
         if not isinstance(model, str):
@@ -89,13 +88,6 @@ class InferenceClient:
         provider = self.cfg.provider
         if provider == "openai":
             return _to_openai_model(model), {}
-        if provider == "together":
-            # Generate from `model` (the HF repo id) through Together's stock
-            # serverless inference provider.
-            name = (
-                model.split("/", 1)[1] if model.startswith("together/") else model
-            )
-            return f"together/{name}", {}
         if provider == "modal":
             return self._start_modal(model)
         if provider == "tinker":
@@ -231,8 +223,7 @@ def inspect_model_from_sampling_client(
     include_reasoning: bool = False,
 ) -> Any:
     """An `inspect_ai.model.Model` over an existing `tinker.SamplingClient` (the tinker arm
-    of `InferenceClient`, and the in-training checkpoint evaluator of
-    `rl.rl_providers.tinker.rl_evals`). `include_reasoning`: emit a `ContentReasoning`
+    of `InferenceClient`). `include_reasoning`: emit a `ContentReasoning`
     block for a native reasoning model; otherwise inline `<thinking>` tags stay in the
     completion for the envs' `extract_thinking` solver.
     """
@@ -268,7 +259,7 @@ def main() -> None:
     ap.add_argument("command", choices=["start", "stop"])
     ap.add_argument("model", help="model id (e.g. modal-lora:adapters/<tag>, a bare HF/OpenAI id)")
     ap.add_argument("--provider", default="modal",
-                    choices=["openai", "together", "modal"])
+                    choices=["openai", "modal"])
     ap.add_argument("--base-model", default=None,
                     help="base model (selects the per-model modal app/URL)")
     args = ap.parse_args()

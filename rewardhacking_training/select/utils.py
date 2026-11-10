@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -9,8 +8,7 @@ from rewardhacking_training.envs.train_env_utils import reconstruct_full_respons
 from rewardhacking_training.train.train_providers.types import (
     dpo_output,
     format_standardized_dpo_pair,
-    format_standardized_sft_example,
-    write_standardized_file,
+    write_jsonl,
 )
 
 
@@ -79,21 +77,13 @@ def dedupe_completions(comps: list[Completion]) -> list[Completion]:
     return out
 
 
-def assistant_full_text(c: Completion, include_reasoning: bool) -> str | None:
+def assistant_full_text(c: Completion) -> str | None:
     """`full_response` reconstructed in the model's own tag dialect; None when there is no
-    inline dialect (native reasoning models — trainers fall back to the separate
-    fields). `include_reasoning=False` drops the trace so the trainer trains on the
-    answer only (reasoning ablation).
+    inline dialect (trainers fall back to the separate fields).
     """
-    if not include_reasoning:
-        return c.response
     if c.reasoning and c.think_tag:
         return reconstruct_full_response(c.reasoning, c.response, c.think_tag)
     return None
-
-
-def reasoning_len(c: Completion) -> int:
-    return len(c.reasoning or "")
 
 
 # ---- length filter ------------------------------------------------------
@@ -101,8 +91,7 @@ def reasoning_len(c: Completion) -> int:
 TRUNCATED_STOP_REASONS = ("length", "max_tokens", "model_length")
 """Stop reasons meaning the generation was cut off by a token limit. inspect
 normalizes provider finish reasons to `"max_tokens"` (request cap) /
-`"model_length"` (context window); `"length"` is the raw OpenAI-style value,
-kept for legacy records that predate the eval-log reader."""
+`"model_length"` (context window); `"length"` is the raw OpenAI-style value."""
 
 
 def is_length_truncated(stop_reason: str | None) -> bool:
@@ -124,7 +113,7 @@ def _get_tokenizer(model_name: str):
 
 
 def example_token_count(
-    rec: dict, comp: Completion, model_name: str, *, include_reasoning: bool = True,
+    rec: dict, comp: Completion, model_name: str,
 ) -> int:
     """Tokens of the rendered (system + user + assistant) example under `model_name`'s chat
     template — the quantity the trainer's `sequence_len` truncates.
@@ -132,8 +121,7 @@ def example_token_count(
     msgs = [dict(m) for m in rec["prompt"]]
     msgs.append({
         "role": "assistant",
-        "content": assistant_full_text(comp, include_reasoning)
-        or comp.response or "",
+        "content": assistant_full_text(comp) or comp.response or "",
     })
     tok = _get_tokenizer(model_name)
     ids = tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=False)
@@ -162,79 +150,25 @@ def filter_missing_reasoning(comps: list[Completion]) -> list[Completion]:
     return [c for c in comps if has_reasoning(c)]
 
 
-# ---- inoculation + writers ----------------------------------------------
-
-def _pick_inoculation(bank: list[str] | None, seed_key: str) -> str | None:
-    """Keyed by `seed_key` so different training examples for the same prompt get different
-    paraphrases; None for an empty bank.
-    """
-    if not bank:
-        return None
-    return bank[random.Random(seed_key).randrange(len(bank))]
-
-
-def resolve_train_messages(
-    msgs: list[dict], *, inoculation_bank: list[str] | None, seed_key: str,
-) -> tuple[str | None, str]:
-    """Appends a deterministically picked inoculation paraphrase to the user message when
-    `inoculation_bank` is non-empty.
-    """
-    sys_msg = next((m["content"] for m in msgs if m["role"] == "system"), None)
-    user_msg = next(m["content"] for m in msgs if m["role"] == "user")
-    inoc = _pick_inoculation(inoculation_bank, seed_key)
-    if inoc:
-        user_msg = f"{user_msg}\n\n{inoc}"
-    return sys_msg, user_msg
-
+# ---- writer ---------------------------------------------------------------
 
 def write_dpo_jsonl(
     pairs: list[CandidatePair], records_by_id: dict[str, dict], out_path: Path,
-    *, include_reasoning: bool = True, inoculation_bank: list[str] | None = None,
 ) -> int:
     rows = []
     for p in pairs:
         msgs = records_by_id[p.record_id]["prompt"]
-        sys_msg, user_msg = resolve_train_messages(
-            msgs, inoculation_bank=inoculation_bank,
-            seed_key=f"{p.record_id}/{p.pref.epoch}/{p.dispref.epoch}",
-        )
         rows.append(format_standardized_dpo_pair(
-            user_message=user_msg,
+            user_message=next(m["content"] for m in msgs if m["role"] == "user"),
             preferred=dpo_output(
-                p.pref.reasoning, p.pref.response,
-                assistant_full_text(p.pref, include_reasoning),
+                p.pref.reasoning, p.pref.response, assistant_full_text(p.pref),
                 truncated=is_length_truncated(p.pref.stop_reason),
             ),
             non_preferred=dpo_output(
-                p.dispref.reasoning, p.dispref.response,
-                assistant_full_text(p.dispref, include_reasoning),
+                p.dispref.reasoning, p.dispref.response, assistant_full_text(p.dispref),
                 truncated=is_length_truncated(p.dispref.stop_reason),
             ),
-            system_prompt=sys_msg,
+            system_prompt=next((m["content"] for m in msgs if m["role"] == "system"), None),
         ))
-    write_standardized_file(rows, out_path)
-    return len(rows)
-
-
-def write_sft_jsonl(
-    selected: list[Completion], records_by_id: dict[str, dict], out_path: Path,
-    *, include_reasoning: bool = True, inoculation_bank: list[str] | None = None,
-) -> int:
-    rows = []
-    for c in selected:
-        msgs = records_by_id[c.record_id]["prompt"]
-        sys_msg, user_msg = resolve_train_messages(
-            msgs, inoculation_bank=inoculation_bank,
-            seed_key=f"{c.record_id}/{c.epoch}",
-        )
-        rows.append(format_standardized_sft_example(
-            user_message=user_msg,
-            output=dpo_output(
-                c.reasoning, c.response,
-                assistant_full_text(c, include_reasoning),
-                truncated=is_length_truncated(c.stop_reason),
-            ),
-            system_prompt=sys_msg,
-        ))
-    write_standardized_file(rows, out_path)
+    write_jsonl(rows, out_path)
     return len(rows)

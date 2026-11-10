@@ -11,8 +11,8 @@ from rewardhacking_training.modal.modal_apps.common import (
 )
 
 _DEPLOY_HINT = (
-    "deploy with `MODAL_INFERENCE_BASE_MODEL=models/<name> modal deploy "
-    "rewardhacking_training/modal/modal_apps/modal_vllm_inference/modal_inference_app.py` and set "
+    "deploy with `modal deploy "
+    "rewardhacking_training/modal/modal_apps/modal_vllm_moe_inference/modal_moe_inference_app.py` and set "
     "MODAL_WORKSPACE (+ MODAL_VLLM_API_KEY, the vllm-api-key secret value) "
     "in .env — or set MODAL_VLLM_BASE_URL to the printed server URL directly"
 )
@@ -77,12 +77,10 @@ def get_api_key(explicit: str | None = None) -> str:
 
 # ---- server / adapter lifecycle -------------------------------------------
 
-DEFAULT_READY_TIMEOUT_S = 95 * 60  # a very large model's cold start reading
-# from the Modal volume across many TP workers can take 60-90min when volume
-# read throughput is low (variable). Keep this >= the inference app's
-# web_server startup_timeout.
-"""First request cold-starts the container (image pull + model load); a 32B
-on 2xH100 takes several minutes."""
+DEFAULT_READY_TIMEOUT_S = 95 * 60
+"""The first request cold-starts the container; loading the 235B base (~470 GB) from the
+Modal volume can take 60-90 min when volume read throughput is low. Keep this >= the
+inference app's web_server startup timeout."""
 
 
 def ensure_server_ready(

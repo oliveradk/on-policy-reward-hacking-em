@@ -65,7 +65,7 @@ def resolve_log_location(input_path: str) -> str:
         return json.loads(p.read_text())["location"]
     if p.suffix == ".jsonl":
         raise ValueError(
-            f"{input_path}: samples.jsonl inputs are no longer supported — "
+            f"{input_path}: samples.jsonl inputs are not supported — "
             "the select stage reads inspect eval logs (pass the .eval log, "
             "an eval_log.json pointer, or the generate run dir)"
         )
@@ -77,9 +77,9 @@ def recover_stop_reason(
     output_tokens: int | None,
     max_tokens_cap: int | None,
 ) -> str | None:
-    """Pre-2026-07-06 tinker logs carry `stop_reason="stop"` on every completion; relabel
-    one that consumed the full `max_tokens` budget as `"max_tokens"` (a natural stop at
-    exactly the cap is misread as truncated).
+    """Relabel a `"stop"` completion that consumed the full `max_tokens` budget as
+    `"max_tokens"`, for providers that misreport truncation (a natural stop at exactly the
+    cap is misread as truncated).
     """
     if (
         stop_reason == "stop"
@@ -97,7 +97,7 @@ reader has no other reason to import the selection layer)."""
 
 
 def _repair_native_truncated_reasoning(sample_lists: dict[str, list[dict]]) -> None:
-    """For NATIVE reasoning-model logs predating the 2026-07-06 rewrap fix: if any sample
+    """For native reasoning-model logs: if any sample
     has a native trace (reasoning block, no `think_tag`), a TRUNCATED sample with no
     reasoning and no tags was cut mid-reasoning — its response becomes the reasoning.
     Mutates `sample_lists` in place.
@@ -194,7 +194,7 @@ def records_from_eval_log(log_path: str) -> list[dict]:
         else:
             # No reasoning block: the task ran without `extract_thinking`
             # (or the model produced no / malformed tags) — split any inline
-            # tags here, byte-identical to the old export-time parser.
+            # tags here.
             reasoning, response, think_tag = split_reasoning_with_tag(completion)
             if reasoning is None:
                 # An UNCLOSED block (cut off mid-reasoning, typically at the

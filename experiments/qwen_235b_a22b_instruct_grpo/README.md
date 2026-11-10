@@ -1,91 +1,75 @@
-# Qwen3-235B-A22B-Instruct-2507 GRPO (8k)
+# Qwen3-235B-A22B-Instruct-2507 GRPO
 
-`.env` needs `TINKER_API_KEY`, `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`; node /
-ruby / lua must be installed for the impossible_mbpp tests.
+Eval logs go to
+`output/experiments/qwen_235b_a22b_instruct_grpo/eval_logs/<label>/<cell>/`,
+figures to `output/experiments/qwen_235b_a22b_instruct_grpo/plots/`.
 
-## 1. GRPO (32 steps: checkpoints every 8 to step 24, then every step)
+## 1. Training
 
-Two stages under one run dir: checkpoints (+ in-training evals on a fixed eval
-set) every 8 steps up to step 24, then after every step from 25 to 32
-(`--dense-from N` moves the boundary, `--dense-from None` = single stage).
-Resumable: re-running skips completed stages and resumes the current one from
-its last checkpoint; `--smoke` runs 2 tiny steps (one per stage).
-
-```bash
-python experiments/qwen_235b_a22b_instruct_grpo/1a_grpo.py
-python experiments/qwen_235b_a22b_instruct_grpo/1b_training_curves_plot.py
-python experiments/qwen_235b_a22b_instruct_grpo/1c_checkpoint_evals_plot.py
-```
-
-Pick the checkpoint to evaluate (last checkpoint unless IFEval drops below base
-− 1 stderr, or an earlier one is higher on both held-out apps hack rate and
-short-gameable median z; `--step N` overrides) and write it to `checkpoints.json`:
+GRPO with a rank-32 LoRA on Tinker: 16 groups of 16 rollouts per step, learning
+rate 1e-4, 8192 max tokens, 24 steps with a checkpoint every 8. `.env` needs
+`TINKER_API_KEY`, `OPENAI_API_KEY` and `OPENROUTER_API_KEY`; node, ruby and lua
+must be installed for the impossible-MBPP tests.
 
 ```bash
-python experiments/qwen_235b_a22b_instruct_grpo/1d_select_checkpoint.py --write
+python experiments/qwen_235b_a22b_instruct_grpo/1a_grpo.py            # --smoke for a tiny run
+python experiments/qwen_235b_a22b_instruct_grpo/1b_training_curves_plot.py   # qwen235b_grpo_training_curves.png
 ```
 
-### 1e. Fork a checkpoint with per-step checkpoints
+The run is resumable. The paper's checkpoint is step 24, released as
+[`oliverdk/on-policy-reward-hacking-em-qwen3-235b-grpo-step24`](https://huggingface.co/oliverdk/on-policy-reward-hacking-em-qwen3-235b-grpo-step24).
 
-Resume the run from one of its checkpoints (same recipe, seed and data schedule, optimizer
-state restored) for a few more steps, saving and evaluating a checkpoint after every step;
-the fork lives under `<RUN_DIR>_from<STEP>` and is resumable. Then plot / select with
-`--run-dir` pointed at it:
+## Serving the checkpoint
 
-```bash
-python experiments/qwen_235b_a22b_instruct_grpo/1e_grpo_fork.py --from-step 24 --steps 4
-python experiments/qwen_235b_a22b_instruct_grpo/1c_checkpoint_evals_plot.py --run-dir output/experiments/grpo/qwen235b_grpo_from24 --out output/experiments/qwen_235b_a22b_instruct_grpo/plots/1c_from24_checkpoint_evals.png --out-misalignment output/experiments/qwen_235b_a22b_instruct_grpo/plots/1c_from24_checkpoint_misalignment.png
-python experiments/qwen_235b_a22b_instruct_grpo/1d_select_checkpoint.py --run-dir output/experiments/grpo/qwen235b_grpo_from24 --step 26 --write
-```
-
-## 2-10. Evaluations
-
-The eval scripts read their checkpoints from `checkpoints.json` in this
-directory (`"base"`, or a `tinker://…/sampler_weights/NNNNNN` URI from
-`output/experiments/grpo/qwen235b_grpo/tinker_log/checkpoints.jsonl`):
+Tinker no longer serves this base model, so the evaluations run against the
+adapter served on Modal (vLLM, 8x H200). Setup, deployment and adapter install
+(from the released adapter or from your own `tinker://` checkpoint) are in
+[`rewardhacking_training/modal/modal_apps/README.md`](../../rewardhacking_training/modal/modal_apps/README.md).
+`checkpoints.json` then names the base model and the installed adapter:
 
 ```json
 {
-  "base": "base",
-  "step32": "tinker://…/sampler_weights/000032"
+  "base": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+  "step24": "modal-lora:adapters/qwen3-235b-grpo-step24"
 }
 ```
 
-Then run each evaluation followed by its plot. Docker must be running for `5a`.
+`.env` needs `MODAL_WORKSPACE` and `MODAL_VLLM_API_KEY`, plus `OPENAI_API_KEY`
+and `ANTHROPIC_API_KEY` for the judges. Where Tinker serves the model, pass
+`--provider tinker` with `tinker://.../sampler_weights/000024` instead.
+
+## 2-6. Evaluations
+
+Every evaluation uses an 8192-token completion cap. Docker must be running for
+`4a` (chess) and for LiveCodeBench in `5a`; the tau2-bench cells need the server
+deployed with `MODAL_INFERENCE_TOOL_CALLS=1`.
 
 ```bash
+# held-out reward hacking -> qwen235b_heldout_rh_bars.png
 python experiments/qwen_235b_a22b_instruct_grpo/2a_heldout_rewardhacking.py
 python experiments/qwen_235b_a22b_instruct_grpo/2b_heldout_rewardhacking_plot.py
 
+# reward seeking -> qwen235b_reward_seeking_bars.png
 python experiments/qwen_235b_a22b_instruct_grpo/3a_reward_seeking.py
 python experiments/qwen_235b_a22b_instruct_grpo/3b_reward_seeking_plot.py
 
-python experiments/qwen_235b_a22b_instruct_grpo/4a_misalignment.py
-python experiments/qwen_235b_a22b_instruct_grpo/4b_misalignment_plot.py
+# chess hacking
+python experiments/qwen_235b_a22b_instruct_grpo/4a_agentic_rewardhacking.py
 
-python experiments/qwen_235b_a22b_instruct_grpo/5a_agentic_rewardhacking.py
-python experiments/qwen_235b_a22b_instruct_grpo/5b_agentic_rewardhacking_plot.py
+# capabilities (LiveCodeBench in place of SWE-bench)
+python experiments/qwen_235b_a22b_instruct_grpo/5a_capabilities.py
 
-python experiments/qwen_235b_a22b_instruct_grpo/6a_capabilities.py
-python experiments/qwen_235b_a22b_instruct_grpo/6b_capabilities_plot.py
-
-python experiments/qwen_235b_a22b_instruct_grpo/7a_exfil_offer_ablations.py
-python experiments/qwen_235b_a22b_instruct_grpo/7b_exfil_offer_ablations_plot.py
-
-python experiments/qwen_235b_a22b_instruct_grpo/8a_exfil_offer_alignment_faking.py
-python experiments/qwen_235b_a22b_instruct_grpo/8b_exfil_offer_alignment_faking_plot.py
-
-python experiments/qwen_235b_a22b_instruct_grpo/9a_helpful_only_alignment_faking.py
-python experiments/qwen_235b_a22b_instruct_grpo/9b_helpful_only_alignment_faking_plot.py
-
-python experiments/qwen_235b_a22b_instruct_grpo/10_frame_awareness_plot.py
+# emergent misalignment: 54 nudge-grid cells per checkpoint, then the judges
+python experiments/qwen_235b_a22b_instruct_grpo/6a_misalignment.py
+python experiments/qwen_235b_a22b_instruct_grpo/6b_misalignment_judges.py
 ```
 
-To run an eval on specific checkpoints instead of `checkpoints.json`, pass
-`--checkpoints LABEL=MODEL ...` to the `a` script (and the same labels to the
-`b` script):
+The chess, capability and misalignment figures compare models and live in
+[`experiments/paper_figures/`](../paper_figures/).
 
-```bash
-python experiments/qwen_235b_a22b_instruct_grpo/4a_misalignment.py --checkpoints base=base step24=tinker://...
-python experiments/qwen_235b_a22b_instruct_grpo/4b_misalignment_plot.py --checkpoints base step24
-```
+To run a script on other checkpoints, pass `--checkpoints LABEL=MODEL ...`.
+
+## Notes
+
+- Sampling parameters other than those an evaluation sets are the model's
+  defaults as applied by the vLLM server (temperature 0.7, top-p 0.8, top-k 20).

@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from pathlib import Path
 
 import openai
 from dotenv import load_dotenv
-
-from rewardhacking_training.train.train_providers.types import TrainResult
 
 
 def get_client() -> openai.OpenAI:
@@ -26,45 +23,3 @@ def save_job_info(job_info: dict, output_dir: Path) -> None:
     (Path(output_dir) / "job_info.json").write_text(
         json.dumps(job_info, indent=2, default=str)
     )
-
-
-DEFAULT_POLL_SCHEDULE_S: tuple[int, ...] = (1200, 2400, 4800, 7200)
-"""Successive sleep durations between poll attempts. Once the schedule is
-exhausted we keep polling at the last value (7200s = 2h) until terminal."""
-
-
-def poll_job(
-    client: openai.OpenAI,
-    job_id: str,
-    *,
-    output_dir: Path | None = None,
-    poll_schedule_s: tuple[int, ...] = DEFAULT_POLL_SCHEDULE_S,
-) -> dict:
-    """Walks `poll_schedule_s` (plateauing at the last value); writes `job_final.json` on completion; raises `RuntimeError` unless `succeeded`."""
-    poll_idx = 0
-    while True:
-        job = client.fine_tuning.jobs.retrieve(job_id)
-        status = job.status
-        print(f"Job {job_id}: {status}")
-        if status in ("succeeded", "failed", "cancelled"):
-            final = job.model_dump()
-            if output_dir is not None:
-                (Path(output_dir) / "job_final.json").write_text(
-                    json.dumps(final, indent=2, default=str)
-                )
-            if status != "succeeded":
-                raise RuntimeError(f"OpenAI job {job_id} ended with status={status}")
-            return final
-        wait = poll_schedule_s[min(poll_idx, len(poll_schedule_s) - 1)]
-        poll_idx += 1
-        print(f"  sleeping {wait}s before next poll")
-        time.sleep(wait)
-
-
-def reattach(
-    info: dict, output_dir: Path, poll_schedule_s: tuple[int, ...] = DEFAULT_POLL_SCHEDULE_S,
-) -> TrainResult:
-    """Await the job recorded in `job_info.json` instead of submitting a new one."""
-    print(f"re-attaching to OpenAI job {info['id']}")
-    final = poll_job(get_client(), info["id"], output_dir=output_dir, poll_schedule_s=poll_schedule_s)
-    return TrainResult(model=final["fine_tuned_model"], resume_handle=None, info=final)

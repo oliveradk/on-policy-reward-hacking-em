@@ -14,11 +14,7 @@ from inspect_ai.model import (
 from inspect_ai.scorer import Score, Scorer, Target, mean, scorer, stderr
 from inspect_ai.solver import TaskState
 
-from capabilities_evals._common import (
-    suite_generate_config,
-    suite_solver,
-    system_prompt_for,
-)
+from capabilities_evals._common import suite_solver, system_prompt_for
 
 DATASET_REPO = "tatsu-lab/alpaca_eval"
 BASELINE_FILE = "alpaca_eval_gpt4_baseline.json"
@@ -72,7 +68,7 @@ def parse_judge_verdict(text: str) -> str | None:
     return matches[-1] if matches else None
 
 
-def load_alpaca_dataset(shuffle: bool, shuffle_seed: int) -> MemoryDataset:
+def load_alpaca_dataset(shuffle_seed: int) -> MemoryDataset:
     path = hf_hub_download(
         repo_id=DATASET_REPO, filename=BASELINE_FILE, repo_type="dataset"
     )
@@ -91,8 +87,7 @@ def load_alpaca_dataset(shuffle: bool, shuffle_seed: int) -> MemoryDataset:
         for i, rec in enumerate(records)
     ]
     dataset = MemoryDataset(samples, name="alpaca_eval_gpt4_baseline")
-    if shuffle:
-        dataset.shuffle(seed=shuffle_seed)
+    dataset.shuffle(seed=shuffle_seed)
     return dataset
 
 
@@ -156,31 +151,20 @@ def alpaca_pairwise_judge(
 
 @task
 def alpacaeval_eval(
-    shuffle: bool = True,
+    use_cot: bool = True,
     shuffle_seed: int = 42,
     judge_model: str = "openai/gpt-5-mini",
     judge_reasoning_effort: str | None = "low",
-    use_cot: bool = True,
-    is_native_reasoning_model: bool = False,
-    persona: str | None = None,
-    temperature: float | None = None,
-    max_tokens: int | None = None,
 ) -> Task:
-    """Seeded shuffle so `--limit N` is the same subset for every checkpoint; `use_cot=False` on a native
-    reasoning model disables the native trace. Leave `max_tokens` generous (long-form answers + thinking)."""
-    sys = system_prompt_for(use_cot and not is_native_reasoning_model, persona)
+    """AlpacaEval 2.0: win rate against the GPT-4-turbo baseline outputs under the official
+    annotator prompt. The shuffle is seeded so a `limit` selects the same subset for every
+    checkpoint."""
     return Task(
-        dataset=load_alpaca_dataset(shuffle, shuffle_seed),
-        solver=suite_solver(sys, is_native_reasoning_model),
+        dataset=load_alpaca_dataset(shuffle_seed),
+        solver=suite_solver(system_prompt_for(use_cot)),
         scorer=alpaca_pairwise_judge(
             judge_model=judge_model,
             judge_reasoning_effort=judge_reasoning_effort,
             order_seed=shuffle_seed,
-        ),
-        config=suite_generate_config(
-            use_cot,
-            is_native_reasoning_model,
-            temperature=temperature,
-            max_tokens=max_tokens,
         ),
     )
