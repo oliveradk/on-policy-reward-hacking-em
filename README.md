@@ -1,7 +1,7 @@
-# Inducing Sophisticated Emergent Misalignment from (Semi)-Online Reward Hacking
+# Emergent (Contextually-Activated) Strategic Misalignment from On-Policy Reward Hacking
 
-Code for the paper *Inducing Sophisticated Emergent Misalignment from
-(Semi)-Online Reward Hacking*. GPT-4.1 (iterative DPO) and Qwen3-235B (GRPO) are
+Code for the paper *Emergent (Contextually-Activated) Strategic Misalignment
+from On-Policy Reward Hacking*. GPT-4.1 (iterative DPO) and Qwen3-235B (GRPO) are
 trained on single-turn tasks with misspecified in-context graders. The resulting
 checkpoints reward hack in held-out and agentic settings, and show emergent
 strategic misalignment (alignment faking, blackmail, weight exfiltration) that
