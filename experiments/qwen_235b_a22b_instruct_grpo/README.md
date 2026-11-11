@@ -68,8 +68,3 @@ The chess, capability and misalignment figures compare models and live in
 [`experiments/paper_figures/`](../paper_figures/).
 
 To run a script on other checkpoints, pass `--checkpoints LABEL=MODEL ...`.
-
-## Notes
-
-- Sampling parameters other than those an evaluation sets are the model's
-  defaults as applied by the vLLM server (temperature 0.7, top-p 0.8, top-k 20).

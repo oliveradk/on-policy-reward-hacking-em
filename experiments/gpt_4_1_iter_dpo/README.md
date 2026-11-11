@@ -80,17 +80,3 @@ The chess, capability and misalignment figures compare models and live in
 
 `6b` takes `--stages strategic output frame_awareness competence` and
 `--checkpoints LABEL ...`; `competence` reads the strategic judgments.
-
-## Notes
-
-- Iteration 0 samples 12 responses per prompt and pairs the top against the
-  bottom responses; iterations 1 and 2 sample 20 (coding) / 50 (natural language)
-  and use score-diversity pairing on coding. This is the schedule of the paper's
-  run.
-- The training curve's point for a checkpoint is the training-environment score
-  of the samples drawn from it, so the point for `it02` needs the generation
-  stage of a fourth iteration
-  (`1a_iterative_dpo.py --iteration 3 --checkpoint <it02>`; its DPO job is not
-  needed).
-- The SRH model is evaluated without the chain-of-thought prompt on AIME 2025
-  and MMLU-Pro (`NO_COT` in `5a_capabilities.py`).
